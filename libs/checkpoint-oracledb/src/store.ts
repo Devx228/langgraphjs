@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import oracledb from "oracledb";
 import {
   BaseStore,
@@ -33,6 +34,27 @@ export interface OracleStoreOptions {
   tablePrefix?: string;
   ensureTable?: boolean;
   index?: IndexConfig;
+}
+
+export type OracleVectorIndexOptions =
+  | OracleHNSWVectorIndexOptions
+  | OracleIVFVectorIndexOptions;
+
+export interface OracleHNSWVectorIndexOptions {
+  type: "HNSW";
+  name?: string;
+  accuracy?: number;
+  neighbors?: number;
+  efConstruction?: number;
+  parallel?: number;
+}
+
+export interface OracleIVFVectorIndexOptions {
+  type: "IVF";
+  name?: string;
+  accuracy?: number;
+  neighborPartitions?: number;
+  parallel?: number;
 }
 
 type StoreRow = {
@@ -117,6 +139,155 @@ function validateIdentifier(identifier: string): string {
     );
   }
   return normalized;
+}
+
+function generatedIdentifier(identifier: string): string {
+  const normalized = identifier.toUpperCase();
+  if (Buffer.byteLength(normalized, "utf8") <= ORACLE_IDENTIFIER_MAX_LENGTH) {
+    return validateIdentifier(normalized);
+  }
+
+  const hash = createHash("sha256")
+    .update(normalized)
+    .digest("hex")
+    .slice(0, 8)
+    .toUpperCase();
+  const suffix = `_${hash}`;
+  let prefix = normalized.slice(0, ORACLE_IDENTIFIER_MAX_LENGTH - suffix.length);
+  while (
+    Buffer.byteLength(`${prefix}${suffix}`, "utf8") >
+    ORACLE_IDENTIFIER_MAX_LENGTH
+  ) {
+    prefix = prefix.slice(0, -1);
+  }
+  return validateIdentifier(`${prefix}${suffix}`);
+}
+
+function defaultVectorIndexName(
+  vectorTableName: string,
+  type: OracleVectorIndexOptions["type"]
+): string {
+  return generatedIdentifier(`${vectorTableName}_EMBED_${type}_IDX`);
+}
+
+function validateIntegerRange(
+  label: string,
+  value: number | undefined,
+  min: number,
+  max: number
+): number | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < min ||
+    value > max
+  ) {
+    throw new Error(
+      `OracleStore vector index ${label} must be an integer between ${min} and ${max}. Received ${String(value)}.`
+    );
+  }
+  return value;
+}
+
+function validatePositiveInteger(
+  label: string,
+  value: number | undefined
+): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
+    throw new Error(
+      `OracleStore vector index ${label} must be a positive safe integer. Received ${String(value)}.`
+    );
+  }
+  return value;
+}
+
+function vectorIndexName(
+  vectorTableName: string,
+  options: OracleVectorIndexOptions
+): string {
+  return options.name === undefined
+    ? defaultVectorIndexName(vectorTableName, options.type)
+    : validateIdentifier(options.name);
+}
+
+function validateVectorIndexOptions(
+  options: OracleVectorIndexOptions
+): OracleVectorIndexOptions {
+  if (
+    typeof options !== "object" ||
+    options === null ||
+    (options.type !== "HNSW" && options.type !== "IVF")
+  ) {
+    throw new Error(
+      'OracleStore vector index type must be either "HNSW" or "IVF".'
+    );
+  }
+
+  validateIntegerRange("accuracy", options.accuracy, 1, 100);
+  validatePositiveInteger("parallel", options.parallel);
+
+  if (options.type === "HNSW") {
+    validateIntegerRange("neighbors", options.neighbors, 2, 2048);
+    validateIntegerRange(
+      "efConstruction",
+      options.efConstruction,
+      1,
+      65535
+    );
+    if (
+      (options.neighbors === undefined) !==
+      (options.efConstruction === undefined)
+    ) {
+      throw new Error(
+        "OracleStore HNSW vector index options require neighbors and efConstruction together."
+      );
+    }
+  } else {
+    validateIntegerRange(
+      "neighborPartitions",
+      options.neighborPartitions,
+      1,
+      10000000
+    );
+  }
+
+  return options;
+}
+
+function createVectorIndexSQL(
+  vectorTableName: string,
+  options: OracleVectorIndexOptions
+): string {
+  const validated = validateVectorIndexOptions(options);
+  const indexName = vectorIndexName(vectorTableName, validated);
+  const accuracy =
+    validated.accuracy === undefined
+      ? ""
+      : `\nWITH TARGET ACCURACY ${validated.accuracy}`;
+  const parallel =
+    validated.parallel === undefined ? "" : `\nPARALLEL ${validated.parallel}`;
+
+  if (validated.type === "HNSW") {
+    const parameters =
+      validated.neighbors === undefined
+        ? ""
+        : `\nPARAMETERS (type HNSW, neighbors ${validated.neighbors}, efconstruction ${validated.efConstruction})`;
+    return `CREATE VECTOR INDEX ${indexName}
+ON ${vectorTableName} (embedding)
+ORGANIZATION INMEMORY NEIGHBOR GRAPH
+DISTANCE COSINE${accuracy}${parameters}${parallel}`;
+  }
+
+  const parameters =
+    validated.neighborPartitions === undefined
+      ? ""
+      : `\nPARAMETERS (type IVF, neighbor partitions ${validated.neighborPartitions})`;
+  return `CREATE VECTOR INDEX ${indexName}
+ON ${vectorTableName} (embedding)
+ORGANIZATION NEIGHBOR PARTITIONS
+DISTANCE COSINE${accuracy}${parameters}${parallel}`;
 }
 
 function validateByteLength(
@@ -808,6 +979,20 @@ export class OracleStore extends BaseStore {
       this.vectorBindStrategy = undefined;
       this.nativeVectorDmlProbed = false;
     }
+  }
+
+  async createVectorIndex(options: OracleVectorIndexOptions): Promise<void> {
+    if (!this.indexConfig) {
+      throw new Error(
+        "OracleStore vector index creation requires an index configuration."
+      );
+    }
+
+    const sql = createVectorIndexSQL(this.vectorTableName, options);
+    await this.setup();
+    await this.withConnection(async (connection) => {
+      await connection.execute(sql);
+    });
   }
 
   private async setup(): Promise<void> {
