@@ -96,6 +96,19 @@ const indexConfig: IndexConfig = {
   fields: ["text"],
 };
 
+type StoreVectorBindStrategyProbe = {
+  vectorBindStrategy?: "native" | "string";
+};
+
+function vectorBindStrategy(store: OracleStore): "native" | "string" | undefined {
+  return (store as unknown as StoreVectorBindStrategyProbe).vectorBindStrategy;
+}
+
+function forceStringVectorBinds(store: OracleStore): void {
+  (store as unknown as StoreVectorBindStrategyProbe).vectorBindStrategy =
+    "string";
+}
+
 describeIfOracle("OracleStore BaseStore contract", () => {
   test("put/get/delete stores and removes items", async () => {
     await withStore(async (store) => {
@@ -855,6 +868,40 @@ describeIfOracle("OracleStore vector search", () => {
     );
   });
 
+  test("uses native vector binds for oversized dense vectors when available", async () => {
+    const dims = 3072;
+    const vector = Array.from({ length: dims }, () => Math.PI);
+    const oversizedEmbeddings = {
+      async embedDocuments(texts: string[]): Promise<number[][]> {
+        return texts.map(() => vector);
+      },
+      async embedQuery(): Promise<number[]> {
+        return vector;
+      },
+    };
+
+    await withStore(
+      async (store) => {
+        await store.start();
+        if (vectorBindStrategy(store) !== "native") return;
+
+        await store.put(["native-vectors"], "doc", { text: "apple fruit" });
+        await expect(
+          store.search(["native-vectors"], { query: "apple", limit: 1 })
+        ).resolves.toEqual([
+          expect.objectContaining({ key: "doc", score: expect.any(Number) }),
+        ]);
+      },
+      {
+        index: {
+          dims,
+          embeddings: oversizedEmbeddings as unknown as IndexConfig["embeddings"],
+          fields: ["text"],
+        },
+      }
+    );
+  });
+
   test("rejects vector literals that exceed Oracle string bind limits", async () => {
     const dims = 3072;
     const longVector = Array.from({ length: dims }, () => Math.PI);
@@ -869,6 +916,7 @@ describeIfOracle("OracleStore vector search", () => {
 
     await withStore(
       async (store) => {
+        forceStringVectorBinds(store);
         await expect(
           store.put(["oversized-vectors"], "doc", { text: "apple fruit" })
         ).rejects.toThrow("OracleStore vector literal exceeds 32767 bytes");
@@ -894,6 +942,7 @@ describeIfOracle("OracleStore vector search", () => {
 
     await withStore(
       async (store) => {
+        forceStringVectorBinds(store);
         await store.put(["oversized-query"], "doc", { text: "apple fruit" }, false);
         await expect(
           store.search(["oversized-query"], { query: "apple", limit: 1 })

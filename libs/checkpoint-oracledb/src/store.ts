@@ -67,7 +67,18 @@ type BoundVector = {
   key: string;
   fieldPath: string;
   textContent: string;
-  embedding: string;
+  embedding: number[];
+};
+
+type VectorBindStrategy = "native" | "string";
+
+type NativeVectorBind = {
+  type: number;
+  val: Float32Array;
+};
+
+type PreparedVector = Omit<BoundVector, "embedding"> & {
+  embedding: string | Float32Array;
 };
 
 type NamespacePathRow = {
@@ -200,7 +211,7 @@ function escapeLike(value: string): string {
   return value.replace(/[\\%_]/g, (match) => `\\${match}`);
 }
 
-function vectorLiteral(vector: number[]): string {
+function validateVectorValues(vector: number[]): void {
   for (const [index, value] of vector.entries()) {
     if (typeof value !== "number" || !Number.isFinite(value)) {
       throw new Error(
@@ -208,6 +219,10 @@ function vectorLiteral(vector: number[]): string {
       );
     }
   }
+}
+
+function vectorLiteral(vector: number[]): string {
+  validateVectorValues(vector);
   const literal = `[${vector.join(",")}]`;
   const byteLength = Buffer.byteLength(literal, "utf8");
   if (byteLength > VECTOR_STRING_BIND_MAX_BYTES) {
@@ -216,6 +231,52 @@ function vectorLiteral(vector: number[]): string {
     );
   }
   return literal;
+}
+
+function nativeVectorValue(vector: number[]): Float32Array {
+  validateVectorValues(vector);
+  return Float32Array.from(vector);
+}
+
+function nativeVectorBind(vector: number[]): NativeVectorBind {
+  if (oracledb.DB_TYPE_VECTOR === undefined) {
+    throw new Error("node-oracledb DB_TYPE_VECTOR is unavailable.");
+  }
+  return {
+    type: oracledb.DB_TYPE_VECTOR,
+    val: nativeVectorValue(vector),
+  };
+}
+
+function vectorBindValue(
+  vector: number[],
+  strategy: VectorBindStrategy
+): string | Float32Array {
+  return strategy === "native"
+    ? nativeVectorValue(vector)
+    : vectorLiteral(vector);
+}
+
+function vectorBindDef(strategy: VectorBindStrategy): Record<string, unknown> {
+  return strategy === "native"
+    ? { type: oracledb.DB_TYPE_VECTOR }
+    : {
+        type: oracledb.STRING,
+        maxSize: VECTOR_STRING_BIND_MAX_BYTES,
+      };
+}
+
+function vectorExpression(
+  bindName: string,
+  strategy: VectorBindStrategy
+): string {
+  return strategy === "native" ? `:${bindName}` : `TO_VECTOR(:${bindName})`;
+}
+
+function probeVector(dims: number): number[] {
+  const vector = new Array(dims).fill(0) as number[];
+  vector[0] = 1;
+  return vector;
 }
 
 function validateVectorDimensions(dims: number): void {
@@ -674,6 +735,10 @@ export class OracleStore extends BaseStore {
 
   private setupPromise?: Promise<void>;
 
+  private vectorBindStrategy?: VectorBindStrategy;
+
+  private nativeVectorDmlProbed = false;
+
   constructor(options: OracleStoreOptions = {}) {
     super();
     this.pool = options.pool;
@@ -740,6 +805,8 @@ export class OracleStore extends BaseStore {
       this.pool = undefined;
       this.isSetup = false;
       this.setupPromise = undefined;
+      this.vectorBindStrategy = undefined;
+      this.nativeVectorDmlProbed = false;
     }
   }
 
@@ -853,7 +920,9 @@ export class OracleStore extends BaseStore {
       .toString(36)
       .slice(2)}__`;
     const fieldPath = "__probe__";
-    const embedding = vectorLiteral(new Array(this.indexConfig.dims).fill(0));
+    const embedding = probeVector(this.indexConfig.dims);
+    const strategy = await this.resolveVectorBindStrategy(connection, true);
+    if (strategy === "native") return;
 
     try {
       await connection.execute(
@@ -877,14 +946,14 @@ WHERE namespace_path = :namespacePath AND item_key = :key AND field_path = :fiel
   :key,
   :fieldPath,
   :textContent,
-  TO_VECTOR(:embedding)
+  ${vectorExpression("embedding", strategy)}
 )`,
         {
           namespacePath: namespacePathValue,
           key,
           fieldPath,
           textContent: "dimension probe",
-          embedding,
+          embedding: vectorBindValue(embedding, strategy),
         }
       );
       await connection.execute(
@@ -906,6 +975,134 @@ WHERE namespace_path = :namespacePath AND item_key = :key AND field_path = :fiel
           : "";
       throw new Error(
         `OracleStore vector table is incompatible with index dims ${this.indexConfig.dims}.${message}`
+      );
+    }
+  }
+
+  private async resolveVectorBindStrategy(
+    connection: Connection,
+    allowDmlProbe: boolean
+  ): Promise<VectorBindStrategy> {
+    if (
+      this.vectorBindStrategy === "native" &&
+      (!allowDmlProbe || this.nativeVectorDmlProbed)
+    ) {
+      return this.vectorBindStrategy;
+    }
+    if (this.vectorBindStrategy === "string") return this.vectorBindStrategy;
+
+    if (!this.indexConfig || oracledb.DB_TYPE_VECTOR === undefined) {
+      this.vectorBindStrategy = "string";
+      return this.vectorBindStrategy;
+    }
+
+    try {
+      if (allowDmlProbe) {
+        await this.probeNativeVectorBinding(connection);
+        this.nativeVectorDmlProbed = true;
+      } else {
+        await this.probeNativeVectorQueryBinding(connection);
+      }
+      this.vectorBindStrategy = "native";
+    } catch {
+      this.vectorBindStrategy = "string";
+      this.nativeVectorDmlProbed = false;
+    }
+    return this.vectorBindStrategy;
+  }
+
+  private async probeNativeVectorQueryBinding(
+    connection: Connection
+  ): Promise<void> {
+    if (!this.indexConfig) return;
+    const embedding = probeVector(this.indexConfig.dims);
+    await connection.execute(
+      `SELECT VECTOR_DISTANCE(
+  TO_VECTOR(:probeLiteral),
+  :probeVector,
+  COSINE
+) AS distance FROM dual`,
+      {
+        probeLiteral: vectorLiteral(embedding),
+        probeVector: nativeVectorBind(embedding),
+      }
+    );
+  }
+
+  private async probeNativeVectorBinding(connection: Connection): Promise<void> {
+    if (!this.indexConfig) return;
+
+    const namespacePathValue = namespacePath([
+      "__langgraph_vector_bind_probe__",
+    ]);
+    const key = `__probe_${Date.now()}_${Math.random()
+      .toString(36)
+      .slice(2)}__`;
+    const fieldPath = "__probe__";
+    const embedding = probeVector(this.indexConfig.dims);
+    const probeRows = this.prepareVectorRows(
+      [
+        {
+          namespacePath: namespacePathValue,
+          key,
+          fieldPath,
+          textContent: "native vector bind probe",
+          embedding,
+        },
+      ],
+      "native"
+    );
+
+    await connection.execute(
+      `DELETE FROM ${this.vectorTableName}
+WHERE namespace_path = :namespacePath AND item_key = :key AND field_path = :fieldPath`,
+      {
+        namespacePath: namespacePathValue,
+        key,
+        fieldPath,
+      }
+    );
+    try {
+      await connection.executeMany(
+        `INSERT INTO ${this.vectorTableName} (
+  namespace_path,
+  item_key,
+  field_path,
+  text_content,
+  embedding
+) VALUES (
+  :namespacePath,
+  :key,
+  :fieldPath,
+  :textContent,
+  ${vectorExpression("embedding", "native")}
+)`,
+        probeRows,
+        {
+          autoCommit: false,
+          bindDefs: this.vectorBindDefs("native"),
+        }
+      );
+      await connection.execute(
+        `SELECT VECTOR_DISTANCE(embedding, :queryVector, COSINE) AS distance
+FROM ${this.vectorTableName}
+WHERE namespace_path = :namespacePath AND item_key = :key AND field_path = :fieldPath`,
+        {
+          namespacePath: namespacePathValue,
+          key,
+          fieldPath,
+          queryVector: nativeVectorBind(embedding),
+        }
+      );
+    } finally {
+      await connection.execute(
+        `DELETE FROM ${this.vectorTableName}
+WHERE namespace_path = :namespacePath AND item_key = :key AND field_path = :fieldPath`,
+        {
+          namespacePath: namespacePathValue,
+          key,
+          fieldPath,
+        }
       );
     }
   }
@@ -939,6 +1136,31 @@ WHERE namespace_path = :namespacePath AND item_key = :key AND field_path = :fiel
       if (!isOracleError(error, 1)) throw error;
       await connection.executeMany(sql, binds, options);
     }
+  }
+
+  private prepareVectorRows(
+    rows: BoundVector[],
+    strategy: VectorBindStrategy
+  ): PreparedVector[] {
+    return rows.map((row) => ({
+      namespacePath: row.namespacePath,
+      key: row.key,
+      fieldPath: row.fieldPath,
+      textContent: row.textContent,
+      embedding: vectorBindValue(row.embedding, strategy),
+    }));
+  }
+
+  private vectorBindDefs(
+    strategy: VectorBindStrategy
+  ): Record<string, Record<string, unknown>> {
+    return {
+      namespacePath: { type: oracledb.STRING, maxSize: 4000 },
+      key: { type: oracledb.STRING, maxSize: 1024 },
+      fieldPath: { type: oracledb.STRING, maxSize: 1024 },
+      textContent: { type: oracledb.CLOB },
+      embedding: vectorBindDef(strategy),
+    };
   }
 
   private async batchPuts(
@@ -1060,6 +1282,7 @@ WHERE namespace_path = :namespacePath AND item_key = :key`,
         }
 
         if (vectorRows.length > 0) {
+          const strategy = await this.resolveVectorBindStrategy(connection, true);
           await this.executeManyWithDuplicateRetry(
             connection,
             `MERGE INTO ${this.vectorTableName} target
@@ -1069,7 +1292,7 @@ USING (
     :key AS item_key,
     :fieldPath AS field_path,
     :textContent AS text_content,
-    TO_VECTOR(:embedding) AS embedding
+    ${vectorExpression("embedding", strategy)} AS embedding
   FROM dual
 ) source
 ON (
@@ -1093,19 +1316,10 @@ WHEN NOT MATCHED THEN INSERT (
   source.text_content,
   source.embedding
 )`,
-            vectorRows,
+            this.prepareVectorRows(vectorRows, strategy),
             {
               autoCommit: false,
-              bindDefs: {
-                namespacePath: { type: oracledb.STRING, maxSize: 4000 },
-                key: { type: oracledb.STRING, maxSize: 1024 },
-                fieldPath: { type: oracledb.STRING, maxSize: 1024 },
-                textContent: { type: oracledb.CLOB },
-                embedding: {
-                  type: oracledb.STRING,
-                  maxSize: VECTOR_STRING_BIND_MAX_BYTES,
-                },
-              },
+              bindDefs: this.vectorBindDefs(strategy),
             }
           );
         }
@@ -1190,12 +1404,13 @@ WHERE namespace_path = :namespacePath AND item_key = :key`,
           `OracleStore embedding dimension mismatch: expected ${this.indexConfig!.dims}, got ${embedding?.length ?? 0}.`
         );
       }
+      validateVectorValues(embedding);
       return {
         namespacePath: namespacePathValue,
         key,
         fieldPath: row.fieldPath,
         textContent: row.text,
-        embedding: vectorLiteral(embedding),
+        embedding: [...embedding],
       };
     });
   }
@@ -1287,7 +1502,8 @@ WHERE namespace_path = :namespacePath AND item_key = :key`,
         `OracleStore query embedding dimension mismatch: expected ${this.indexConfig.dims}, got ${queryEmbedding.length}.`
       );
     }
-    const queryVector = vectorLiteral(queryEmbedding);
+    validateVectorValues(queryEmbedding);
+    const queryVector = [...queryEmbedding];
 
     const offset = op.offset ?? 0;
     const limit = op.limit ?? 10;
@@ -1324,7 +1540,7 @@ WHERE namespace_path = :namespacePath AND item_key = :key`,
   private async fetchFilteredVectorRows(
     op: SearchOperation,
     sqlFilter: SqlFilter,
-    queryVector: string,
+    queryVector: number[],
     offset: number,
     limit: number
   ): Promise<StoreRow[]> {
@@ -1363,7 +1579,7 @@ WHERE namespace_path = :namespacePath AND item_key = :key`,
   private async fetchVectorRows(
     op: SearchOperation,
     sqlFilter: SqlFilter | undefined,
-    queryVector: string,
+    queryVector: number[],
     sqlOffset: number,
     fetchLimit: number | undefined
   ): Promise<StoreRow[]> {
@@ -1373,6 +1589,7 @@ WHERE namespace_path = :namespacePath AND item_key = :key`,
         : "\nOFFSET :sqlOffset ROWS FETCH NEXT :fetchLimit ROWS ONLY";
 
     return this.withConnection(async (connection) => {
+      const strategy = await this.resolveVectorBindStrategy(connection, false);
       const result = await connection.execute<StoreRow>(
         `WITH scored AS (
   SELECT
@@ -1381,7 +1598,11 @@ WHERE namespace_path = :namespacePath AND item_key = :key`,
     MAX(
       CASE
         WHEN v.embedding IS NULL THEN NULL
-        ELSE 1 - VECTOR_DISTANCE(v.embedding, TO_VECTOR(:queryVector), COSINE)
+        ELSE 1 - VECTOR_DISTANCE(
+          v.embedding,
+          ${vectorExpression("queryVector", strategy)},
+          COSINE
+        )
       END
     ) AS score
   FROM ${this.tableName} s
@@ -1409,7 +1630,10 @@ INNER JOIN ${this.tableName} s
   AND s.item_key = sc.item_key
 ORDER BY CASE WHEN sc.score IS NULL THEN 1 ELSE 0 END, sc.score DESC, key${fetchClause}`,
         {
-          queryVector,
+          queryVector:
+            strategy === "native"
+              ? nativeVectorBind(queryVector)
+              : vectorLiteral(queryVector),
           namespacePath: namespacePath(op.namespacePrefix),
           namespacePrefix:
             op.namespacePrefix.length === 0
