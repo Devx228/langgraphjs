@@ -72,6 +72,20 @@ WHERE index_name = :indexName`,
   }
 }
 
+async function createUnrelatedStoreIndex(
+  prefix: string,
+  indexName: string
+): Promise<void> {
+  const connection = await oracledb.getConnection(oracleConnection);
+  try {
+    await connection.execute(
+      `CREATE INDEX ${indexName.toUpperCase()} ON ${prefix.toUpperCase()}STORE (item_key)`
+    );
+  } finally {
+    await connection.close();
+  }
+}
+
 function oracleErrorCode(error: unknown): number | string | undefined {
   if (typeof error !== "object" || error === null) return undefined;
   const code = (error as { errorNum?: number; code?: string | number })
@@ -623,6 +637,59 @@ describeIfOracle("OracleStore vector index management", () => {
     );
   });
 
+  test("lists vector indexes after IVF creation", async () => {
+    await withStore(
+      async (store, prefix) => {
+        const indexName = `${prefix}IVF_LIST_IDX`;
+        await store.put(["vectors"], "doc", { text: "apple fruit" });
+
+        await store.createVectorIndex({
+          type: "IVF",
+          name: indexName,
+          accuracy: 90,
+          neighborPartitions: 1,
+          parallel: 1,
+        });
+
+        const indexes = await store.listVectorIndexes();
+        const created = indexes.find((index) => index.name === indexName);
+
+        expect(created).toMatchObject({
+          name: indexName,
+          tableName: `${prefix}STORE_VECTORS`.toUpperCase(),
+          columnName: "EMBEDDING",
+          status: expect.any(String),
+          indexType: expect.any(String),
+          appearsOnStoreVectorEmbedding: true,
+        });
+      },
+      { index: indexConfig }
+    );
+  });
+
+  test("drops an IVF vector index after creation", async () => {
+    await withStore(
+      async (store, prefix) => {
+        const indexName = `${prefix}IVF_DROP_IDX`;
+        await store.put(["vectors"], "doc", { text: "apple fruit" });
+
+        await store.createVectorIndex({
+          type: "IVF",
+          name: indexName,
+          neighborPartitions: 1,
+        });
+
+        await expect(userIndexExists(indexName)).resolves.toBe(true);
+        await store.dropVectorIndex({ name: indexName });
+        await expect(userIndexExists(indexName)).resolves.toBe(false);
+        await expect(store.listVectorIndexes()).resolves.not.toEqual(
+          expect.arrayContaining([expect.objectContaining({ name: indexName })])
+        );
+      },
+      { index: indexConfig }
+    );
+  });
+
   test("creates a vector index with a default name", async (context) => {
     await withStore(
       async (store, prefix) => {
@@ -643,6 +710,17 @@ describeIfOracle("OracleStore vector index management", () => {
       },
       { index: indexConfig }
     );
+  });
+
+  test("no-ops when dropping a missing vector index with ifExists true", async () => {
+    await withStore(async (store, prefix) => {
+      await expect(
+        store.dropVectorIndex({
+          name: `${prefix}MISSING_IDX`,
+          ifExists: true,
+        })
+      ).resolves.toBeUndefined();
+    });
   });
 
   test("requires an index configuration before vector index creation", async () => {
@@ -670,6 +748,31 @@ describeIfOracle("OracleStore vector index management", () => {
       },
       { index: indexConfig }
     );
+  });
+
+  test("validates vector index drop names before executing DDL", async () => {
+    await withStore(async (store) => {
+      await expect(
+        store.dropVectorIndex({ name: "bad-name" })
+      ).rejects.toThrow("Invalid Oracle identifier");
+    });
+  });
+
+  test("refuses to drop unrelated indexes", async () => {
+    await withStore(async (store, prefix) => {
+      const indexName = `${prefix}STORE_ITEM_IDX`;
+      await store.start();
+      await createUnrelatedStoreIndex(prefix, indexName);
+
+      await expect(userIndexExists(indexName)).resolves.toBe(true);
+      await expect(
+        store.dropVectorIndex({ name: indexName, ifExists: true })
+      ).rejects.toThrow("not on");
+      await expect(userIndexExists(indexName)).resolves.toBe(true);
+      await expect(store.listVectorIndexes()).resolves.not.toEqual(
+        expect.arrayContaining([expect.objectContaining({ name: indexName })])
+      );
+    });
   });
 
   test("validates vector index numeric options before executing DDL", async () => {

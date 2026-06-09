@@ -57,6 +57,20 @@ export interface OracleIVFVectorIndexOptions {
   parallel?: number;
 }
 
+export interface OracleVectorIndexInfo {
+  name: string;
+  tableName: string;
+  columnName: string;
+  status?: string;
+  indexType?: string;
+  appearsOnStoreVectorEmbedding: boolean;
+}
+
+export interface OracleDropVectorIndexOptions {
+  name: string;
+  ifExists?: boolean;
+}
+
 type StoreRow = {
   KEY: string;
   key?: string;
@@ -106,6 +120,19 @@ type PreparedVector = Omit<BoundVector, "embedding"> & {
 type NamespacePathRow = {
   NAMESPACE_PATH: string;
   namespace_path?: string;
+};
+
+type VectorIndexMetadataRow = {
+  INDEX_NAME: string;
+  index_name?: string;
+  TABLE_NAME: string;
+  table_name?: string;
+  COLUMN_NAME: string | null;
+  column_name?: string | null;
+  STATUS?: string | null;
+  status?: string | null;
+  INDEX_TYPE?: string | null;
+  index_type?: string | null;
 };
 
 type SqlFilter = {
@@ -288,6 +315,56 @@ DISTANCE COSINE${accuracy}${parameters}${parallel}`;
 ON ${vectorTableName} (embedding)
 ORGANIZATION NEIGHBOR PARTITIONS
 DISTANCE COSINE${accuracy}${parameters}${parallel}`;
+}
+
+function vectorIndexInfoFromRow(
+  row: VectorIndexMetadataRow,
+  vectorTableName: string
+): OracleVectorIndexInfo {
+  const name = row.INDEX_NAME ?? row.index_name;
+  const tableName = row.TABLE_NAME ?? row.table_name;
+  const columnName = row.COLUMN_NAME ?? row.column_name ?? "";
+  const status = row.STATUS ?? row.status ?? undefined;
+  const indexType = row.INDEX_TYPE ?? row.index_type ?? undefined;
+
+  return {
+    name,
+    tableName,
+    columnName,
+    status,
+    indexType,
+    appearsOnStoreVectorEmbedding:
+      tableName.toUpperCase() === vectorTableName &&
+      columnName.toUpperCase() === "EMBEDDING",
+  };
+}
+
+function vectorIndexMetadataSQL(whereClause: string): string {
+  return `SELECT
+  i.index_name,
+  i.table_name,
+  c.column_name,
+  i.status,
+  i.index_type
+FROM user_indexes i
+LEFT JOIN user_ind_columns c
+  ON c.index_name = i.index_name
+  AND c.table_name = i.table_name
+${whereClause}
+ORDER BY i.index_name, c.column_position`;
+}
+
+function validateDropVectorIndexOptions(
+  options: OracleDropVectorIndexOptions
+): string {
+  if (
+    typeof options !== "object" ||
+    options === null ||
+    typeof options.name !== "string"
+  ) {
+    throw new Error("OracleStore dropVectorIndex requires an index name.");
+  }
+  return validateIdentifier(options.name);
 }
 
 function validateByteLength(
@@ -995,6 +1072,30 @@ export class OracleStore extends BaseStore {
     });
   }
 
+  async listVectorIndexes(): Promise<OracleVectorIndexInfo[]> {
+    return this.fetchStoreVectorIndexInfo();
+  }
+
+  async dropVectorIndex(options: OracleDropVectorIndexOptions): Promise<void> {
+    const indexName = validateDropVectorIndexOptions(options);
+    const indexes = await this.fetchVectorIndexInfoByName(indexName);
+
+    if (indexes.length === 0) {
+      if (options.ifExists) return;
+      throw new Error(`OracleStore vector index "${indexName}" does not exist.`);
+    }
+
+    if (!indexes.every((index) => index.appearsOnStoreVectorEmbedding)) {
+      throw new Error(
+        `OracleStore will not drop index "${indexName}" because it is not on ${this.vectorTableName}(EMBEDDING).`
+      );
+    }
+
+    await this.withConnection(async (connection) => {
+      await connection.execute(`DROP INDEX ${indexName}`);
+    });
+  }
+
   private async setup(): Promise<void> {
     if (this.isSetup) return;
     this.setupPromise ??= this.doSetup().catch((error) => {
@@ -1307,6 +1408,42 @@ WHERE namespace_path = :namespacePath AND item_key = :key AND field_path = :fiel
     } finally {
       await connection.close();
     }
+  }
+
+  private async fetchStoreVectorIndexInfo(): Promise<OracleVectorIndexInfo[]> {
+    const result = await this.withConnection((connection) =>
+      connection.execute<VectorIndexMetadataRow>(
+        vectorIndexMetadataSQL(
+          `WHERE i.table_name = :tableName
+  AND c.column_name = :columnName`
+        ),
+        {
+          tableName: this.vectorTableName,
+          columnName: "EMBEDDING",
+        },
+        { outFormat: oracledb.OUT_FORMAT_OBJECT }
+      )
+    );
+
+    return (result.rows ?? []).map((row) =>
+      vectorIndexInfoFromRow(row, this.vectorTableName)
+    );
+  }
+
+  private async fetchVectorIndexInfoByName(
+    indexName: string
+  ): Promise<OracleVectorIndexInfo[]> {
+    const result = await this.withConnection((connection) =>
+      connection.execute<VectorIndexMetadataRow>(
+        vectorIndexMetadataSQL("WHERE i.index_name = :indexName"),
+        { indexName },
+        { outFormat: oracledb.OUT_FORMAT_OBJECT }
+      )
+    );
+
+    return (result.rows ?? []).map((row) =>
+      vectorIndexInfoFromRow(row, this.vectorTableName)
+    );
   }
 
   private async executeManyWithDuplicateRetry<T extends Record<string, unknown>>(
