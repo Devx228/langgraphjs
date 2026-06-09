@@ -16,12 +16,22 @@ import {
 } from "@langchain/langgraph-checkpoint";
 import oracledb from "oracledb";
 
+import {
+  getOracleDiagnosticsStatus,
+  getOracleRuntimeDiagnostics,
+  inspectOracleMigrations,
+  inspectOracleSchema,
+  type ExpectedOracleTable,
+  type OracleCheckpointSaverDiagnostics,
+  type OracleDiagnosticsOptions,
+} from "./diagnostics.js";
 import { getMigrations } from "./migrations.js";
 import {
   type OracleBindParams,
   buildSelectCheckpointSQL,
   decodeCheckpointNamespace,
   encodeCheckpointNamespace,
+  getOracleCheckpointTables,
   getOracleSQLStatements,
   getOracleSetupStatements,
   getPendingSendsParams,
@@ -115,6 +125,77 @@ const CHECKPOINT_WRITE_BINDS: Record<string, BindDefinition> = {
   channel: STRING_512,
   type: STRING_255,
   blob: BLOB_BIND,
+};
+
+const getExpectedCheckpointTables = (
+  tables: ReturnType<typeof getOracleCheckpointTables>
+): ExpectedOracleTable[] => [
+  {
+    name: tables.checkpoint_migrations,
+    required: true,
+    columns: [{ name: "v", dataTypes: ["NUMBER"] }],
+    primaryKey: ["v"],
+  },
+  {
+    name: tables.checkpoints,
+    required: true,
+    columns: [
+      { name: "thread_id", dataTypes: ["VARCHAR2"] },
+      { name: "checkpoint_ns", dataTypes: ["VARCHAR2"] },
+      { name: "checkpoint_id", dataTypes: ["VARCHAR2"] },
+      { name: "parent_checkpoint_id", dataTypes: ["VARCHAR2"] },
+      { name: "type", dataTypes: ["VARCHAR2"] },
+      { name: "metadata_type", dataTypes: ["VARCHAR2"] },
+      { name: "checkpoint", dataTypes: ["BLOB"] },
+      { name: "metadata", dataTypes: ["BLOB"] },
+    ],
+    primaryKey: ["thread_id", "checkpoint_ns", "checkpoint_id"],
+  },
+  {
+    name: tables.checkpoint_blobs,
+    required: true,
+    columns: [
+      { name: "thread_id", dataTypes: ["VARCHAR2"] },
+      { name: "checkpoint_ns", dataTypes: ["VARCHAR2"] },
+      { name: "channel", dataTypes: ["VARCHAR2"] },
+      { name: "version", dataTypes: ["VARCHAR2"] },
+      { name: "type", dataTypes: ["VARCHAR2"] },
+      { name: "blob", dataTypes: ["BLOB"] },
+    ],
+    primaryKey: ["thread_id", "checkpoint_ns", "channel", "version"],
+  },
+  {
+    name: tables.checkpoint_writes,
+    required: true,
+    columns: [
+      { name: "thread_id", dataTypes: ["VARCHAR2"] },
+      { name: "checkpoint_ns", dataTypes: ["VARCHAR2"] },
+      { name: "checkpoint_id", dataTypes: ["VARCHAR2"] },
+      { name: "task_id", dataTypes: ["VARCHAR2"] },
+      { name: "idx", dataTypes: ["NUMBER"] },
+      { name: "channel", dataTypes: ["VARCHAR2"] },
+      { name: "type", dataTypes: ["VARCHAR2"] },
+      { name: "blob", dataTypes: ["BLOB"] },
+    ],
+    primaryKey: ["thread_id", "checkpoint_ns", "checkpoint_id", "task_id", "idx"],
+  },
+];
+
+const checkpointStorageModeFromDiagnostics = (
+  diagnostics: OracleCheckpointSaverDiagnostics
+): OracleCheckpointSaverDiagnostics["storageMode"] => {
+  const checkpointTable = diagnostics.schema.tables.find(
+    (table) => table.name === diagnostics.tables.checkpoints
+  );
+  if (!checkpointTable?.exists) return "missing";
+  const checkpointColumn = checkpointTable.columns.find(
+    (column) => column.name.toUpperCase() === "CHECKPOINT"
+  );
+  if (!checkpointColumn) return "unknown";
+  const dataType = checkpointColumn.dataType.toUpperCase();
+  if (dataType === "BLOB") return "blob";
+  if (dataType === "CLOB") return "clob";
+  return "unknown";
 };
 
 function isConnection(value: unknown): value is OracleConnectionLike {
@@ -366,6 +447,42 @@ export class OracleCheckpointSaver extends BaseCheckpointSaver {
     }
     this.pool = undefined;
     this.setupPromise = undefined;
+  }
+
+  async getDiagnostics(
+    options: OracleDiagnosticsOptions = {}
+  ): Promise<OracleCheckpointSaverDiagnostics> {
+    return this.withConnection(async (connection) => {
+      const tables = getOracleCheckpointTables(this.tablePrefix);
+      const expectedTables = getExpectedCheckpointTables(tables);
+      const expectedVersions = getMigrations(this.tablePrefix).map(
+        (_migration, version) => version
+      );
+      const schema = await inspectOracleSchema(
+        connection,
+        expectedTables,
+        options
+      );
+      const migrations = await inspectOracleMigrations(
+        connection,
+        tables.checkpoint_migrations,
+        expectedVersions,
+        expectedVersions
+      );
+      const diagnostics: OracleCheckpointSaverDiagnostics = {
+        kind: "checkpoint",
+        status: getOracleDiagnosticsStatus(schema, migrations),
+        tablePrefix: this.tablePrefix,
+        tables,
+        runtime: getOracleRuntimeDiagnostics(oracledb, connection),
+        migrations,
+        schema,
+        storageMode: "unknown",
+        issues: [...schema.issues],
+      };
+      diagnostics.storageMode = checkpointStorageModeFromDiagnostics(diagnostics);
+      return diagnostics;
+    });
   }
 
   async getTuple(config: RunnableConfig): Promise<CheckpointTuple | undefined> {

@@ -1,5 +1,12 @@
 export { OracleCheckpointSaver } from "./saver.js";
 export type {
+  OracleCheckpointSaverDiagnostics,
+  OracleDiagnosticsOptions,
+  OracleDiagnosticsStatus,
+  OracleStoreDiagnostics,
+  OracleStoreVectorDiagnostics,
+} from "./diagnostics.js";
+export type {
   OracleCheckpointSaverOptions,
   OracleConnectionOptions,
 } from "./saver.js";

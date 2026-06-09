@@ -15,6 +15,16 @@ import {
 } from "@langchain/langgraph-checkpoint";
 import type { Connection, Pool } from "oracledb";
 import {
+  getOracleDiagnosticsStatus,
+  getOracleRuntimeDiagnostics,
+  inspectOracleMigrations,
+  inspectOracleSchema,
+  probeOracleVector,
+  type ExpectedOracleTable,
+  type OracleDiagnosticsOptions,
+  type OracleStoreDiagnostics,
+} from "./diagnostics.js";
+import {
   getCreateStoreMigrationTableSQL,
   getCreateStoreTableSQL,
   getCreateStoreVectorTableSQL,
@@ -94,6 +104,49 @@ const STORE_FIELD_PATH_MAX_BYTES = 1024;
 const JSON_VALUE_VARCHAR_MAX_BYTES = 4000;
 const VECTOR_STRING_BIND_MAX_BYTES = 32767;
 const STORE_KEY_ENCODING_PREFIX = "b64:";
+
+const getExpectedStoreTables = (
+  tables: {
+    store: string;
+    storeVectors: string;
+    storeMigrations: string;
+  },
+  vectorRequired: boolean
+): ExpectedOracleTable[] => [
+  {
+    name: tables.storeMigrations,
+    required: true,
+    columns: [{ name: "v", dataTypes: ["NUMBER"] }],
+    primaryKey: ["v"],
+  },
+  {
+    name: tables.store,
+    required: true,
+    columns: [
+      { name: "namespace_path", dataTypes: ["VARCHAR2"] },
+      { name: "item_key", dataTypes: ["VARCHAR2"] },
+      { name: "namespace", dataTypes: ["CLOB"] },
+      { name: "item_value", dataTypes: ["CLOB"] },
+      { name: "created_at", dataTypes: ["TIMESTAMP WITH TIME ZONE"] },
+      { name: "updated_at", dataTypes: ["TIMESTAMP WITH TIME ZONE"] },
+    ],
+    primaryKey: ["namespace_path", "item_key"],
+    jsonColumns: ["namespace", "item_value"],
+  },
+  {
+    name: tables.storeVectors,
+    required: vectorRequired,
+    columns: [
+      { name: "namespace_path", dataTypes: ["VARCHAR2"] },
+      { name: "item_key", dataTypes: ["VARCHAR2"] },
+      { name: "field_path", dataTypes: ["VARCHAR2"] },
+      { name: "text_content", dataTypes: ["CLOB"] },
+      { name: "embedding", dataTypes: ["VECTOR"] },
+      { name: "created_at", dataTypes: ["TIMESTAMP WITH TIME ZONE"] },
+    ],
+    primaryKey: ["namespace_path", "item_key", "field_path"],
+  },
+];
 
 function validateIdentifier(identifier: string): string {
   if (!/^[A-Za-z][A-Za-z0-9_$#]*$/.test(identifier)) {
@@ -741,6 +794,80 @@ export class OracleStore extends BaseStore {
       this.isSetup = false;
       this.setupPromise = undefined;
     }
+  }
+
+  async getDiagnostics(
+    options: OracleDiagnosticsOptions = {}
+  ): Promise<OracleStoreDiagnostics> {
+    await this.ensurePool();
+    return this.withConnection(async (connection) => {
+      const tables = {
+        store: this.tableName,
+        storeVectors: this.vectorTableName,
+        storeMigrations: this.migrationTableName,
+      };
+      const vectorRequired = this.indexConfig !== undefined;
+      const expectedTables = getExpectedStoreTables(tables, vectorRequired);
+      const expectedVersions = vectorRequired ? [0, 1] : [0];
+      const knownVersions = [0, 1];
+      const schema = await inspectOracleSchema(
+        connection,
+        expectedTables,
+        options
+      );
+      const migrations = await inspectOracleMigrations(
+        connection,
+        this.migrationTableName,
+        expectedVersions,
+        knownVersions
+      );
+      const vectorProbe = await probeOracleVector(
+        connection,
+        this.indexConfig?.dims ?? 1
+      );
+      const vectorTable = schema.tables.find(
+        (table) => table.name === this.vectorTableName
+      );
+      const embeddingColumn = vectorTable?.columns.find(
+        (column) => column.name.toUpperCase() === "EMBEDDING"
+      );
+      const vectorColumn =
+        Array.isArray(vectorTable?.vectorColumns)
+          ? vectorTable.vectorColumns.find(
+              (column) => column.columnName.toUpperCase() === "EMBEDDING"
+            )
+          : undefined;
+
+      return {
+        kind: "store",
+        status: getOracleDiagnosticsStatus(schema, migrations),
+        tablePrefix: this.tableName.slice(0, -"STORE".length),
+        tables,
+        runtime: getOracleRuntimeDiagnostics(oracledb, connection),
+        migrations,
+        schema,
+        vector: {
+          configured: vectorRequired,
+          ...(this.indexConfig ? { configuredDims: this.indexConfig.dims } : {}),
+          ...(this.indexConfig?.fields
+            ? { configuredFields: this.indexConfig.fields }
+            : {}),
+          probe: vectorProbe,
+          embeddingColumn: {
+            status: embeddingColumn
+              ? "present"
+              : vectorTable?.exists
+                ? "missing"
+                : "unknown",
+            ...(vectorColumn?.vectorInfo
+              ? { vectorInfo: vectorColumn.vectorInfo }
+              : {}),
+          },
+          observedIndexes: vectorTable?.indexes ?? [],
+        },
+        issues: [...schema.issues],
+      };
+    });
   }
 
   private async setup(): Promise<void> {

@@ -8,6 +8,8 @@ declare module "oracledb" {
   }
 
   export interface Connection {
+    oracleServerVersion?: number;
+    oracleServerVersionString?: string;
     execute<T = Record<string, unknown>>(
       sql: string,
       binds?: BindParameters,
@@ -41,6 +43,9 @@ declare module "oracledb" {
     CLOB: number;
     BLOB: number;
     NUMBER: number;
+    version?: number;
+    versionString?: string;
+    thin?: boolean;
     getConnection: typeof getConnection;
     createPool: typeof createPool;
   };
@@ -51,6 +56,9 @@ declare module "oracledb" {
   export const CLOB: number;
   export const BLOB: number;
   export const NUMBER: number;
+  export const version: number | undefined;
+  export const versionString: string | undefined;
+  export const thin: boolean | undefined;
 
   export default oracledb;
 }
