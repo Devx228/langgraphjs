@@ -11,4 +11,11 @@ export type {
   OracleConnectionOptions,
 } from "./saver.js";
 export { OracleStore } from "./store.js";
-export type { OracleStoreOptions } from "./store.js";
+export type {
+  OracleDropVectorIndexOptions,
+  OracleHNSWVectorIndexOptions,
+  OracleIVFVectorIndexOptions,
+  OracleStoreOptions,
+  OracleVectorIndexInfo,
+  OracleVectorIndexOptions,
+} from "./store.js";
