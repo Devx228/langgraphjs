@@ -1,8 +1,6 @@
-import { createHash } from "node:crypto";
 import oracledb from "oracledb";
 import {
   BaseStore,
-  InvalidNamespaceError,
   type GetOperation,
   type Item,
   type ListNamespacesOperation,
@@ -30,6 +28,33 @@ import {
   getCreateStoreTableSQL,
   getCreateStoreVectorTableSQL,
 } from "./store-migrations.js";
+import {
+  DEFAULT_TABLE_PREFIX,
+  JSON_VALUE_VARCHAR_MAX_BYTES,
+  STORE_FIELD_PATH_MAX_BYTES,
+  STORE_KEY_MAX_BYTES,
+  STORE_NAMESPACE_PATH_MAX_BYTES,
+  VECTOR_STRING_BIND_MAX_BYTES,
+} from "./store/constants.js";
+import {
+  generatedIdentifier,
+  validateIdentifier,
+} from "./store/identifiers.js";
+import {
+  getTextAtPath,
+  jsonPath,
+  jsonValueExpression,
+} from "./store/json-path.js";
+import {
+  decodeStoreKey,
+  encodeStoreKey,
+  escapeLike,
+  hasNamespacePrefix,
+  matchesNamespaceCondition,
+  namespacePath,
+  namespacePrefixLikePattern,
+  validateNamespace,
+} from "./store/namespace.js";
 import { isOracleError } from "./utils.js";
 
 export interface OracleConnectionOptions {
@@ -157,15 +182,6 @@ type NamespaceSqlFilter = {
   fullyPushed: boolean;
 };
 
-const DEFAULT_TABLE_PREFIX = "LANGGRAPH_";
-const ORACLE_IDENTIFIER_MAX_LENGTH = 128;
-const STORE_NAMESPACE_PATH_MAX_BYTES = 4000;
-const STORE_KEY_MAX_BYTES = 1024;
-const STORE_FIELD_PATH_MAX_BYTES = 1024;
-const JSON_VALUE_VARCHAR_MAX_BYTES = 4000;
-const VECTOR_STRING_BIND_MAX_BYTES = 32767;
-const STORE_KEY_ENCODING_PREFIX = "b64:";
-
 const getExpectedStoreTables = (
   tables: {
     store: string;
@@ -208,41 +224,6 @@ const getExpectedStoreTables = (
     primaryKey: ["namespace_path", "item_key", "field_path"],
   },
 ];
-
-function validateIdentifier(identifier: string): string {
-  if (!/^[A-Za-z][A-Za-z0-9_$#]*$/.test(identifier)) {
-    throw new Error(`Invalid Oracle identifier: ${identifier}`);
-  }
-  const normalized = identifier.toUpperCase();
-  if (Buffer.byteLength(normalized, "utf8") > ORACLE_IDENTIFIER_MAX_LENGTH) {
-    throw new Error(
-      `Oracle identifier "${normalized}" exceeds ${ORACLE_IDENTIFIER_MAX_LENGTH} bytes.`
-    );
-  }
-  return normalized;
-}
-
-function generatedIdentifier(identifier: string): string {
-  const normalized = identifier.toUpperCase();
-  if (Buffer.byteLength(normalized, "utf8") <= ORACLE_IDENTIFIER_MAX_LENGTH) {
-    return validateIdentifier(normalized);
-  }
-
-  const hash = createHash("sha256")
-    .update(normalized)
-    .digest("hex")
-    .slice(0, 8)
-    .toUpperCase();
-  const suffix = `_${hash}`;
-  let prefix = normalized.slice(0, ORACLE_IDENTIFIER_MAX_LENGTH - suffix.length);
-  while (
-    Buffer.byteLength(`${prefix}${suffix}`, "utf8") >
-    ORACLE_IDENTIFIER_MAX_LENGTH
-  ) {
-    prefix = prefix.slice(0, -1);
-  }
-  return validateIdentifier(`${prefix}${suffix}`);
-}
 
 function defaultVectorIndexName(
   vectorTableName: string,
@@ -435,38 +416,6 @@ function validateByteLength(
   }
 }
 
-function validateNamespace(namespace: string[]): void {
-  if (namespace.length === 0) {
-    throw new InvalidNamespaceError("Namespace cannot be empty.");
-  }
-  for (const label of namespace) {
-    if (typeof label !== "string") {
-      throw new InvalidNamespaceError(
-        `Invalid namespace label '${label}' found in ${namespace}. Namespace labels must be strings, but got ${typeof label}.`
-      );
-    }
-    if (label.includes(".")) {
-      throw new InvalidNamespaceError(
-        `Invalid namespace label '${label}' found in ${namespace}. Namespace labels cannot contain periods ('.').`
-      );
-    }
-    if (label === "") {
-      throw new InvalidNamespaceError(
-        `Namespace labels cannot be empty strings. Got ${label} in ${namespace}`
-      );
-    }
-  }
-  if (namespace[0] === "langgraph") {
-    throw new InvalidNamespaceError(
-      `Root label for namespace cannot be "langgraph". Got: ${namespace}`
-    );
-  }
-}
-
-function namespacePath(namespace: string[]): string {
-  return JSON.stringify(namespace);
-}
-
 function validateNamespacePathLength(namespace: string[]): void {
   validateByteLength(
     "namespace path",
@@ -477,28 +426,6 @@ function validateNamespacePathLength(namespace: string[]): void {
 
 function validateStoreKey(key: string): void {
   validateByteLength("key", encodeStoreKey(key), STORE_KEY_MAX_BYTES);
-}
-
-function encodeStoreKey(key: string): string {
-  return `${STORE_KEY_ENCODING_PREFIX}${Buffer.from(key, "utf8").toString(
-    "base64url"
-  )}`;
-}
-
-function decodeStoreKey(key: string): string {
-  if (!key.startsWith(STORE_KEY_ENCODING_PREFIX)) return key;
-  return Buffer.from(
-    key.slice(STORE_KEY_ENCODING_PREFIX.length),
-    "base64url"
-  ).toString("utf8");
-}
-
-function namespacePrefixLikePattern(namespace: string[]): string {
-  return `${escapeLike(namespacePath(namespace).slice(0, -1))},%`;
-}
-
-function escapeLike(value: string): string {
-  return value.replace(/[\\%_]/g, (match) => `\\${match}`);
 }
 
 function validateVectorValues(vector: number[]): void {
@@ -577,111 +504,6 @@ function validateVectorDimensions(dims: number): void {
   }
 }
 
-function tokenizePath(path: string): string[] {
-  if (!path) return [];
-
-  const tokens: string[] = [];
-  let current = "";
-  let i = 0;
-  while (i < path.length) {
-    const char = path[i];
-    if (char === ".") {
-      if (current) {
-        tokens.push(current);
-      }
-      current = "";
-      i += 1;
-      continue;
-    }
-
-    if (char === "[" || char === "{") {
-      if (current) {
-        tokens.push(current);
-        current = "";
-      }
-      const close = char === "[" ? "]" : "}";
-      let depth = 1;
-      let token = char;
-      i += 1;
-      while (i < path.length && depth > 0) {
-        if (path[i] === char) depth += 1;
-        if (path[i] === close) depth -= 1;
-        token += path[i];
-        i += 1;
-      }
-      tokens.push(token);
-      continue;
-    }
-
-    current += char;
-    i += 1;
-  }
-  if (current) tokens.push(current);
-  return tokens;
-}
-
-function getTextAtPath(value: unknown, path: string): string[] {
-  if (!path || path === "$") return [JSON.stringify(value, null, 2)];
-  const tokens = tokenizePath(path);
-
-  const extract = (current: unknown, position: number): string[] => {
-    if (position >= tokens.length) {
-      if (
-        typeof current === "string" ||
-        typeof current === "number" ||
-        typeof current === "boolean"
-      ) {
-        return [String(current)];
-      }
-      if (current === null || current === undefined) return [];
-      if (Array.isArray(current) || typeof current === "object") {
-        return [JSON.stringify(current, null, 2)];
-      }
-      return [];
-    }
-
-    const token = tokens[position];
-    if (token.startsWith("[") && token.endsWith("]")) {
-      if (!Array.isArray(current)) return [];
-      const rawIndex = token.slice(1, -1);
-      if (rawIndex === "*") {
-        return current.flatMap((item) => extract(item, position + 1));
-      }
-      const parsed = Number.parseInt(rawIndex, 10);
-      if (Number.isNaN(parsed)) return [];
-      const index = parsed < 0 ? current.length + parsed : parsed;
-      return index >= 0 && index < current.length
-        ? extract(current[index], position + 1)
-        : [];
-    }
-
-    if (token.startsWith("{") && token.endsWith("}")) {
-      if (typeof current !== "object" || current === null) return [];
-      return token
-        .slice(1, -1)
-        .split(",")
-        .flatMap((field) => getTextAtPath(current, field.trim()));
-    }
-
-    if (token === "*") {
-      if (Array.isArray(current)) {
-        return current.flatMap((item) => extract(item, position + 1));
-      }
-      if (typeof current === "object" && current !== null) {
-        return Object.values(current).flatMap((item) =>
-          extract(item, position + 1)
-        );
-      }
-      return [];
-    }
-
-    if (typeof current !== "object" || current === null) return [];
-    return extract((current as Record<string, unknown>)[token], position + 1);
-  };
-
-  return extract(value, 0);
-}
-
 function parseJson<T>(value: string | T): T {
   return typeof value === "string" ? (JSON.parse(value) as T) : value;
 }
@@ -700,30 +522,6 @@ function rowToSearchItem(row: StoreRow): SearchItem {
   const item = rowToItem(row);
   const score = row.SCORE ?? row.score;
   return score === undefined ? item : { ...item, score: Number(score) };
-}
-
-function hasNamespacePrefix(namespace: string[], prefix: string[]): boolean {
-  if (prefix.length > namespace.length) return false;
-  return prefix.every((label, index) => namespace[index] === label);
-}
-
-function matchesNamespaceCondition(
-  namespace: string[],
-  condition: MatchCondition
-): boolean {
-  const { path, matchType } = condition;
-  if (path.length > namespace.length) return false;
-
-  if (matchType === "prefix") {
-    return path.every(
-      (label, index) => label === "*" || namespace[index] === label
-    );
-  }
-
-  const offset = namespace.length - path.length;
-  return path.every(
-    (label, index) => label === "*" || namespace[offset + index] === label
-  );
 }
 
 function buildNamespaceSqlFilter(
@@ -849,17 +647,6 @@ function matchesFilter(
   );
 }
 
-function jsonPath(field: string): string | undefined {
-  const parts = field.split(".");
-  if (
-    parts.length === 0 ||
-    !parts.every((part) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(part))
-  ) {
-    return undefined;
-  }
-  return `'$${parts.map((part) => `."${part}"`).join("")}'`;
-}
-
 function primitiveBindValue(value: unknown): string | number | undefined {
   if (typeof value === "string") {
     if (
@@ -873,18 +660,6 @@ function primitiveBindValue(value: unknown): string | number | undefined {
   if (typeof value === "number") return value;
   if (typeof value === "boolean") return value ? "true" : "false";
   return undefined;
-}
-
-function jsonValueExpression(
-  field: string,
-  kind: "string" | "number" = "string",
-  column = "item_value"
-): string | undefined {
-  const path = jsonPath(field);
-  if (!path) return undefined;
-  const returning =
-    kind === "number" ? "NUMBER NULL ON ERROR" : "VARCHAR2(4000) NULL ON ERROR";
-  return `JSON_VALUE(${column}, ${path} RETURNING ${returning})`;
 }
 
 function buildSqlFilter(
