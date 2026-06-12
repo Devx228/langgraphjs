@@ -1,9 +1,4 @@
-const ORACLE_IDENTIFIER_MAX_LENGTH = 128;
-
-const constraintName = (tableName: string, suffix: string): string => {
-  const maxPrefixLength = ORACLE_IDENTIFIER_MAX_LENGTH - suffix.length - 1;
-  return `${tableName.slice(0, maxPrefixLength)}_${suffix}`;
-};
+import { oracleConstraintName } from "./utils.js";
 
 export interface OracleStoreMigrationTables {
   store: string;
@@ -15,7 +10,7 @@ export const getCreateStoreMigrationTableSQL = (
   tables: OracleStoreMigrationTables
 ): string => `CREATE TABLE ${tables.storeMigrations} (
   v NUMBER(10) NOT NULL,
-  CONSTRAINT ${constraintName(tables.storeMigrations, "PK")} PRIMARY KEY (v)
+  CONSTRAINT ${oracleConstraintName(tables.storeMigrations, "PK")} PRIMARY KEY (v)
 )`;
 
 export const getCreateStoreTableSQL = (
@@ -27,7 +22,7 @@ export const getCreateStoreTableSQL = (
   item_value CLOB CHECK (item_value IS JSON) NOT NULL,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
-  CONSTRAINT ${constraintName(tables.store, "PK")} PRIMARY KEY (namespace_path, item_key)
+  CONSTRAINT ${oracleConstraintName(tables.store, "PK")} PRIMARY KEY (namespace_path, item_key)
 )`;
 
 export const getCreateStoreVectorTableSQL = (
@@ -40,7 +35,7 @@ export const getCreateStoreVectorTableSQL = (
   text_content CLOB,
   embedding VECTOR(${dims}, FLOAT32) NOT NULL,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
-  CONSTRAINT ${constraintName(tables.storeVectors, "PK")} PRIMARY KEY (
+  CONSTRAINT ${oracleConstraintName(tables.storeVectors, "PK")} PRIMARY KEY (
     namespace_path,
     item_key,
     field_path

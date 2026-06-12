@@ -30,6 +30,7 @@ import {
   getCreateStoreTableSQL,
   getCreateStoreVectorTableSQL,
 } from "./store-migrations.js";
+import { isOracleError } from "./utils.js";
 
 export interface OracleConnectionOptions {
   [key: string]: unknown;
@@ -432,18 +433,6 @@ function validateByteLength(
       `OracleStore ${label} exceeds ${maxBytes} bytes. Received ${byteLength} bytes.`
     );
   }
-}
-
-function oracleErrorCode(error: unknown): number | string | undefined {
-  if (typeof error !== "object" || error === null) return undefined;
-  const code = (error as { errorNum?: number; code?: string | number })
-    .errorNum;
-  return code ?? (error as { code?: string | number }).code;
-}
-
-function isOracleError(error: unknown, code: number): boolean {
-  const actual = oracleErrorCode(error);
-  return actual === code || actual === `ORA-${String(code).padStart(5, "0")}`;
 }
 
 function validateNamespace(namespace: string[]): void {

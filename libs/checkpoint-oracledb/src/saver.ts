@@ -37,6 +37,7 @@ import {
   getPendingSendsParams,
   validateTablePrefix,
 } from "./sql.js";
+import { isOracleError, rowValue } from "./utils.js";
 
 export interface OracleConnectionOptions {
   [key: string]: unknown;
@@ -205,22 +206,6 @@ function isConnection(value: unknown): value is OracleConnectionLike {
     "execute" in value &&
     typeof (value as OracleConnectionLike).execute === "function"
   );
-}
-
-function rowValue<T>(row: OracleRow, key: string): T {
-  return (row[key] ?? row[key.toUpperCase()]) as T;
-}
-
-function oracleErrorCode(error: unknown): number | string | undefined {
-  if (typeof error !== "object" || error === null) return undefined;
-  const code = (error as { errorNum?: number; code?: string | number })
-    .errorNum;
-  return code ?? (error as { code?: string | number }).code;
-}
-
-function isOracleError(error: unknown, code: number): boolean {
-  const actual = oracleErrorCode(error);
-  return actual === code || actual === `ORA-${String(code).padStart(5, "0")}`;
 }
 
 function validateByteLength(

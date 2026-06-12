@@ -3,22 +3,18 @@ import {
   getOracleCheckpointTables,
   type OracleCheckpointTables,
 } from "./sql.js";
+import { oracleConstraintName } from "./utils.js";
 
 export interface OracleCheckpointMigration {
   version: number;
   sql: string;
 }
 
-const constraintName = (tableName: string, suffix: string): string => {
-  const maxPrefixLength = 128 - suffix.length - 1;
-  return `${tableName.slice(0, maxPrefixLength)}_${suffix}`;
-};
-
 const getCreateMigrationTableSQL = (
   tables: OracleCheckpointTables
 ): string => `CREATE TABLE ${tables.checkpoint_migrations} (
   v NUMBER(10) NOT NULL,
-  CONSTRAINT ${constraintName(tables.checkpoint_migrations, "pk")} PRIMARY KEY (v)
+  CONSTRAINT ${oracleConstraintName(tables.checkpoint_migrations, "pk")} PRIMARY KEY (v)
 )`;
 
 const getCreateCheckpointsTableSQL = (
@@ -32,7 +28,7 @@ const getCreateCheckpointsTableSQL = (
   metadata_type VARCHAR2(255),
   checkpoint BLOB NOT NULL,
   metadata BLOB NOT NULL,
-  CONSTRAINT ${constraintName(tables.checkpoints, "pk")} PRIMARY KEY (
+  CONSTRAINT ${oracleConstraintName(tables.checkpoints, "pk")} PRIMARY KEY (
     thread_id,
     checkpoint_ns,
     checkpoint_id
@@ -48,7 +44,7 @@ const getCreateCheckpointBlobsTableSQL = (
   version VARCHAR2(512) NOT NULL,
   type VARCHAR2(255) NOT NULL,
   blob BLOB,
-  CONSTRAINT ${constraintName(tables.checkpoint_blobs, "pk")} PRIMARY KEY (
+  CONSTRAINT ${oracleConstraintName(tables.checkpoint_blobs, "pk")} PRIMARY KEY (
     thread_id,
     checkpoint_ns,
     channel,
@@ -67,7 +63,7 @@ const getCreateCheckpointWritesTableSQL = (
   channel VARCHAR2(512) NOT NULL,
   type VARCHAR2(255),
   blob BLOB NOT NULL,
-  CONSTRAINT ${constraintName(tables.checkpoint_writes, "pk")} PRIMARY KEY (
+  CONSTRAINT ${oracleConstraintName(tables.checkpoint_writes, "pk")} PRIMARY KEY (
     thread_id,
     checkpoint_ns,
     checkpoint_id,

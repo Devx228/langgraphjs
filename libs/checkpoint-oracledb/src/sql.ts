@@ -13,8 +13,6 @@ const TABLE_SUFFIXES = [
 
 const TABLE_PREFIX_RE = /^[A-Za-z][A-Za-z0-9_]*$/;
 
-export type OracleCheckpointTableSuffix = (typeof TABLE_SUFFIXES)[number];
-
 export interface OracleCheckpointTables {
   checkpoints: string;
   checkpoint_blobs: string;
@@ -30,8 +28,6 @@ export type OracleBindPrimitive =
   | undefined;
 
 export type OracleBindParams = Record<string, OracleBindPrimitive>;
-
-export type OracleSerializedCheckpoint = Record<string, unknown>;
 
 export interface OracleParameterizedSQL {
   sql: string;
@@ -58,42 +54,6 @@ export interface OracleSQLStatements {
   DELETE_CHECKPOINT_BLOBS_SQL: string;
   DELETE_CHECKPOINT_WRITES_SQL: string;
 }
-
-export type OracleSQLTypes = {
-  SELECT_CHECKPOINT_SQL: {
-    thread_id: string;
-    checkpoint_ns: string;
-    checkpoint_id: string;
-    parent_checkpoint_id: string | null;
-    type: string | null;
-    metadata_type: string | null;
-    checkpoint: Uint8Array;
-    metadata: Uint8Array;
-  };
-  SELECT_CHECKPOINT_BLOBS_SQL: {
-    channel: string;
-    type: string;
-    blob: Uint8Array | null;
-  };
-  SELECT_CHECKPOINT_WRITES_SQL: {
-    task_id: string;
-    channel: string;
-    type: string | null;
-    blob: Uint8Array;
-  };
-  SELECT_PENDING_SENDS_SQL: {
-    checkpoint_id: string;
-    type: string | null;
-    blob: Uint8Array;
-  };
-  UPSERT_CHECKPOINT_BLOBS_SQL: unknown;
-  UPSERT_CHECKPOINTS_SQL: unknown;
-  UPSERT_CHECKPOINT_WRITES_SQL: unknown;
-  INSERT_CHECKPOINT_WRITES_SQL: unknown;
-  DELETE_CHECKPOINTS_SQL: unknown;
-  DELETE_CHECKPOINT_BLOBS_SQL: unknown;
-  DELETE_CHECKPOINT_WRITES_SQL: unknown;
-};
 
 export const encodeCheckpointNamespace = (
   checkpointNs?: string | null
@@ -145,8 +105,6 @@ export const getOracleCheckpointTables = (
   };
 };
 
-export const getTablesWithPrefix = getOracleCheckpointTables;
-
 export const getOracleSetupStatements = (
   tablePrefix: string = DEFAULT_TABLE_PREFIX
 ): OracleSetupStatements => {
@@ -170,27 +128,6 @@ WHERE table_name IN (
 FROM user_tables
 WHERE table_name = UPPER(:table_name)`,
   };
-};
-
-export const tableExistsSQL = (): string =>
-  `SELECT COUNT(*) AS table_count
-FROM user_tables
-WHERE table_name = UPPER(:table_name)`;
-
-export const getListTablesParams = (
-  tablePrefix: string = DEFAULT_TABLE_PREFIX
-): OracleBindParams => ({ ...getOracleCheckpointTables(tablePrefix) });
-
-export const getTableExistsParams = (
-  tableName: keyof OracleCheckpointTables | OracleCheckpointTableSuffix | string,
-  tablePrefix: string = DEFAULT_TABLE_PREFIX
-): OracleBindParams => {
-  const tables = getOracleCheckpointTables(tablePrefix);
-  const resolvedTableName =
-    tableName in tables
-      ? tables[tableName as keyof OracleCheckpointTables]
-      : tableName;
-  return { table_name: resolvedTableName };
 };
 
 export const getOracleSQLStatements = (
@@ -415,8 +352,6 @@ WHERE thread_id = :thread_id`,
 WHERE thread_id = :thread_id`,
   };
 };
-
-export const getSQLStatements = getOracleSQLStatements;
 
 const buildFetchFirstClause = (limit?: number): string => {
   if (limit === undefined) return "";

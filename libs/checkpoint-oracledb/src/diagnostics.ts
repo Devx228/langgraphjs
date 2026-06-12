@@ -1,4 +1,9 @@
 import oracledb from "oracledb";
+import {
+  isOracleError,
+  oracleErrorCode,
+  optionalRowValue as rowValue,
+} from "./utils.js";
 
 export type OracleDiagnosticsStatus =
   | "ready"
@@ -195,27 +200,12 @@ const VECTOR_UNAVAILABLE_CODES = new Set<number | string>([
   "ORA-03001",
 ]);
 
-const rowValue = <T>(row: OracleRow, key: string): T | undefined =>
-  (row[key] ?? row[key.toUpperCase()]) as T | undefined;
-
-const oracleErrorCode = (error: unknown): number | string | undefined => {
-  if (typeof error !== "object" || error === null) return undefined;
-  const code = (error as { errorNum?: number; code?: number | string })
-    .errorNum;
-  return code ?? (error as { code?: number | string }).code;
-};
-
 const diagnosticsError = (
   reason: string,
   error: unknown
 ): OracleDiagnosticsError => {
   const code = oracleErrorCode(error);
   return code === undefined ? { reason } : { reason, code };
-};
-
-const isOracleError = (error: unknown, code: number): boolean => {
-  const actual = oracleErrorCode(error);
-  return actual === code || actual === `ORA-${String(code).padStart(5, "0")}`;
 };
 
 const assertSelectOnly = (sql: string): void => {
