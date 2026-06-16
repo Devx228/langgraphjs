@@ -1,6 +1,12 @@
 declare module "oracledb" {
   export type ExecuteOptions = Record<string, unknown>;
   export type BindParameters = Record<string, unknown>;
+  export type VectorBindValue =
+    | number[]
+    | Float32Array
+    | Float64Array
+    | Int8Array
+    | Uint8Array;
 
   export interface Result<T = Record<string, unknown>> {
     rows?: T[];
@@ -8,6 +14,8 @@ declare module "oracledb" {
   }
 
   export interface Connection {
+    oracleServerVersion?: number;
+    oracleServerVersionString?: string;
     execute<T = Record<string, unknown>>(
       sql: string,
       binds?: BindParameters,
@@ -41,6 +49,10 @@ declare module "oracledb" {
     CLOB: number;
     BLOB: number;
     NUMBER: number;
+    DB_TYPE_VECTOR?: number;
+    version?: number;
+    versionString?: string;
+    thin?: boolean;
     getConnection: typeof getConnection;
     createPool: typeof createPool;
   };
@@ -51,6 +63,10 @@ declare module "oracledb" {
   export const CLOB: number;
   export const BLOB: number;
   export const NUMBER: number;
+  export const DB_TYPE_VECTOR: number | undefined;
+  export const version: number | undefined;
+  export const versionString: string | undefined;
+  export const thin: boolean | undefined;
 
   export default oracledb;
 }

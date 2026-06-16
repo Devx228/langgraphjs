@@ -1,6 +1,6 @@
 import { config } from "dotenv";
 import oracledb from "oracledb";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, type TestContext } from "vitest";
 
 import {
   InvalidNamespaceError,
@@ -52,6 +52,61 @@ async function dropStoreTables(prefix: string): Promise<void> {
   }
 }
 
+async function userIndexExists(indexName: string): Promise<boolean> {
+  const connection = await oracledb.getConnection(oracleConnection);
+  try {
+    const result = await connection.execute<{
+      INDEX_COUNT: number;
+      index_count?: number;
+    }>(
+      `SELECT COUNT(*) AS index_count
+FROM user_indexes
+WHERE index_name = :indexName`,
+      { indexName: indexName.toUpperCase() },
+      { outFormat: oracledb.OUT_FORMAT_OBJECT }
+    );
+    const row = result.rows?.[0];
+    return Number(row?.INDEX_COUNT ?? row?.index_count ?? 0) > 0;
+  } finally {
+    await connection.close();
+  }
+}
+
+async function createUnrelatedStoreIndex(
+  prefix: string,
+  indexName: string
+): Promise<void> {
+  const connection = await oracledb.getConnection(oracleConnection);
+  try {
+    await connection.execute(
+      `CREATE INDEX ${indexName.toUpperCase()} ON ${prefix.toUpperCase()}STORE (item_key)`
+    );
+  } finally {
+    await connection.close();
+  }
+}
+
+function oracleErrorCode(error: unknown): number | string | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const code = (error as { errorNum?: number; code?: string | number })
+    .errorNum;
+  return code ?? (error as { code?: string | number }).code;
+}
+
+function isOracleError(error: unknown, code: number): boolean {
+  const actual = oracleErrorCode(error);
+  return actual === code || actual === `ORA-${String(code).padStart(5, "0")}`;
+}
+
+function skipIfHnswMemoryUnavailable(
+  context: TestContext,
+  error: unknown
+): void {
+  if (isOracleError(error, 51962)) {
+    context.skip("Oracle VECTOR memory area is unavailable for HNSW indexes.");
+  }
+}
+
 async function withStore<T>(
   callback: (store: OracleStore, prefix: string) => Promise<T>,
   options: Omit<ConstructorParameters<typeof OracleStore>[0], "connection" | "tablePrefix"> = {}
@@ -95,6 +150,19 @@ const indexConfig: IndexConfig = {
   embeddings: testEmbeddings as IndexConfig["embeddings"],
   fields: ["text"],
 };
+
+type StoreVectorBindStrategyProbe = {
+  vectorBindStrategy?: "native" | "string";
+};
+
+function vectorBindStrategy(store: OracleStore): "native" | "string" | undefined {
+  return (store as unknown as StoreVectorBindStrategyProbe).vectorBindStrategy;
+}
+
+function forceStringVectorBinds(store: OracleStore): void {
+  (store as unknown as StoreVectorBindStrategyProbe).vectorBindStrategy =
+    "string";
+}
 
 describeIfOracle("OracleStore BaseStore contract", () => {
   test("put/get/delete stores and removes items", async () => {
@@ -501,6 +569,242 @@ describeIfOracle("OracleStore BaseStore contract", () => {
   });
 });
 
+describeIfOracle("OracleStore vector index management", () => {
+  test("creates an HNSW vector index and leaves search semantics unchanged", async (context) => {
+    await withStore(
+      async (store, prefix) => {
+        const indexName = `${prefix}HNSW_IDX`;
+        await store.put(["vectors"], "indexed", {
+          text: "apple fruit",
+          color: "red",
+        });
+        await store.put(
+          ["vectors"],
+          "not-indexed",
+          { text: "apple fruit", color: "red" },
+          false
+        );
+
+        try {
+          await store.createVectorIndex({
+            type: "HNSW",
+            name: indexName,
+            accuracy: 90,
+            neighbors: 2,
+            efConstruction: 4,
+            parallel: 1,
+          });
+        } catch (error) {
+          skipIfHnswMemoryUnavailable(context, error);
+          throw error;
+        }
+
+        await expect(userIndexExists(indexName)).resolves.toBe(true);
+
+        const results = await store.search(["vectors"], {
+          query: "apple",
+          filter: { color: "red" },
+          limit: 10,
+        });
+        expect(results.map((item) => item.key)).toEqual([
+          "indexed",
+          "not-indexed",
+        ]);
+        expect(results[0].score).toEqual(expect.any(Number));
+        expect(results[1].score).toBeUndefined();
+      },
+      { index: indexConfig }
+    );
+  });
+
+  test("creates an IVF vector index", async () => {
+    await withStore(
+      async (store, prefix) => {
+        const indexName = `${prefix}IVF_IDX`;
+        await store.put(["vectors"], "doc", { text: "apple fruit" });
+
+        await store.createVectorIndex({
+          type: "IVF",
+          name: indexName,
+          accuracy: 90,
+          neighborPartitions: 1,
+          parallel: 1,
+        });
+
+        await expect(userIndexExists(indexName)).resolves.toBe(true);
+      },
+      { index: indexConfig }
+    );
+  });
+
+  test("lists vector indexes after IVF creation", async () => {
+    await withStore(
+      async (store, prefix) => {
+        const indexName = `${prefix}IVF_LIST_IDX`;
+        await store.put(["vectors"], "doc", { text: "apple fruit" });
+
+        await store.createVectorIndex({
+          type: "IVF",
+          name: indexName,
+          accuracy: 90,
+          neighborPartitions: 1,
+          parallel: 1,
+        });
+
+        const indexes = await store.listVectorIndexes();
+        const created = indexes.find((index) => index.name === indexName);
+
+        expect(created).toMatchObject({
+          name: indexName,
+          tableName: `${prefix}STORE_VECTORS`.toUpperCase(),
+          columnName: "EMBEDDING",
+          status: expect.any(String),
+          indexType: expect.any(String),
+          appearsOnStoreVectorEmbedding: true,
+        });
+      },
+      { index: indexConfig }
+    );
+  });
+
+  test("drops an IVF vector index after creation", async () => {
+    await withStore(
+      async (store, prefix) => {
+        const indexName = `${prefix}IVF_DROP_IDX`;
+        await store.put(["vectors"], "doc", { text: "apple fruit" });
+
+        await store.createVectorIndex({
+          type: "IVF",
+          name: indexName,
+          neighborPartitions: 1,
+        });
+
+        await expect(userIndexExists(indexName)).resolves.toBe(true);
+        await store.dropVectorIndex({ name: indexName });
+        await expect(userIndexExists(indexName)).resolves.toBe(false);
+        await expect(store.listVectorIndexes()).resolves.not.toEqual(
+          expect.arrayContaining([expect.objectContaining({ name: indexName })])
+        );
+      },
+      { index: indexConfig }
+    );
+  });
+
+  test("creates a vector index with a default name", async (context) => {
+    await withStore(
+      async (store, prefix) => {
+        const indexName = `${prefix}STORE_VECTORS_EMBED_HNSW_IDX`;
+        await store.put(["vectors"], "doc", { text: "apple fruit" });
+
+        try {
+          await store.createVectorIndex({
+            type: "HNSW",
+            accuracy: 95,
+          });
+        } catch (error) {
+          skipIfHnswMemoryUnavailable(context, error);
+          throw error;
+        }
+
+        await expect(userIndexExists(indexName)).resolves.toBe(true);
+      },
+      { index: indexConfig }
+    );
+  });
+
+  test("no-ops when dropping a missing vector index with ifExists true", async () => {
+    await withStore(async (store, prefix) => {
+      await expect(
+        store.dropVectorIndex({
+          name: `${prefix}MISSING_IDX`,
+          ifExists: true,
+        })
+      ).resolves.toBeUndefined();
+    });
+  });
+
+  test("requires an index configuration before vector index creation", async () => {
+    await withStore(async (store, prefix) => {
+      await expect(
+        store.createVectorIndex({ type: "HNSW", name: `${prefix}HNSW_IDX` })
+      ).rejects.toThrow(
+        "OracleStore vector index creation requires an index configuration."
+      );
+    });
+  });
+
+  test("validates vector index names before executing DDL", async () => {
+    await withStore(
+      async (store) => {
+        await expect(
+          store.createVectorIndex({ type: "HNSW", name: "bad-name" })
+        ).rejects.toThrow("Invalid Oracle identifier");
+        await expect(
+          store.createVectorIndex({
+            type: "HNSW",
+            name: `A${"A".repeat(128)}`,
+          })
+        ).rejects.toThrow("exceeds 128 bytes");
+      },
+      { index: indexConfig }
+    );
+  });
+
+  test("validates vector index drop names before executing DDL", async () => {
+    await withStore(async (store) => {
+      await expect(
+        store.dropVectorIndex({ name: "bad-name" })
+      ).rejects.toThrow("Invalid Oracle identifier");
+    });
+  });
+
+  test("refuses to drop unrelated indexes", async () => {
+    await withStore(async (store, prefix) => {
+      const indexName = `${prefix}STORE_ITEM_IDX`;
+      await store.start();
+      await createUnrelatedStoreIndex(prefix, indexName);
+
+      await expect(userIndexExists(indexName)).resolves.toBe(true);
+      await expect(
+        store.dropVectorIndex({ name: indexName, ifExists: true })
+      ).rejects.toThrow("not on");
+      await expect(userIndexExists(indexName)).resolves.toBe(true);
+      await expect(store.listVectorIndexes()).resolves.not.toEqual(
+        expect.arrayContaining([expect.objectContaining({ name: indexName })])
+      );
+    });
+  });
+
+  test("validates vector index numeric options before executing DDL", async () => {
+    await withStore(
+      async (store, prefix) => {
+        await expect(
+          store.createVectorIndex({
+            type: "HNSW",
+            name: `${prefix}BAD_ACCURACY_IDX`,
+            accuracy: 0,
+          })
+        ).rejects.toThrow("accuracy");
+        await expect(
+          store.createVectorIndex({
+            type: "HNSW",
+            name: `${prefix}BAD_HNSW_IDX`,
+            neighbors: 2,
+          })
+        ).rejects.toThrow("neighbors and efConstruction together");
+        await expect(
+          store.createVectorIndex({
+            type: "IVF",
+            name: `${prefix}BAD_IVF_IDX`,
+            neighborPartitions: 0,
+          })
+        ).rejects.toThrow("neighborPartitions");
+      },
+      { index: indexConfig }
+    );
+  });
+});
+
 describeIfOracle("OracleStore vector search", () => {
   test("validates index dimensions before setup", async () => {
     for (const dims of [0, -1, 1.5, Number.POSITIVE_INFINITY, Number.NaN]) {
@@ -855,6 +1159,40 @@ describeIfOracle("OracleStore vector search", () => {
     );
   });
 
+  test("uses native vector binds for oversized dense vectors when available", async () => {
+    const dims = 3072;
+    const vector = Array.from({ length: dims }, () => Math.PI);
+    const oversizedEmbeddings = {
+      async embedDocuments(texts: string[]): Promise<number[][]> {
+        return texts.map(() => vector);
+      },
+      async embedQuery(): Promise<number[]> {
+        return vector;
+      },
+    };
+
+    await withStore(
+      async (store) => {
+        await store.start();
+        if (vectorBindStrategy(store) !== "native") return;
+
+        await store.put(["native-vectors"], "doc", { text: "apple fruit" });
+        await expect(
+          store.search(["native-vectors"], { query: "apple", limit: 1 })
+        ).resolves.toEqual([
+          expect.objectContaining({ key: "doc", score: expect.any(Number) }),
+        ]);
+      },
+      {
+        index: {
+          dims,
+          embeddings: oversizedEmbeddings as unknown as IndexConfig["embeddings"],
+          fields: ["text"],
+        },
+      }
+    );
+  });
+
   test("rejects vector literals that exceed Oracle string bind limits", async () => {
     const dims = 3072;
     const longVector = Array.from({ length: dims }, () => Math.PI);
@@ -869,6 +1207,7 @@ describeIfOracle("OracleStore vector search", () => {
 
     await withStore(
       async (store) => {
+        forceStringVectorBinds(store);
         await expect(
           store.put(["oversized-vectors"], "doc", { text: "apple fruit" })
         ).rejects.toThrow("OracleStore vector literal exceeds 32767 bytes");
@@ -894,6 +1233,7 @@ describeIfOracle("OracleStore vector search", () => {
 
     await withStore(
       async (store) => {
+        forceStringVectorBinds(store);
         await store.put(["oversized-query"], "doc", { text: "apple fruit" }, false);
         await expect(
           store.search(["oversized-query"], { query: "apple", limit: 1 })
