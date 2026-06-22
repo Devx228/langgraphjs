@@ -156,6 +156,26 @@ function validateByteLength(
   }
 }
 
+function validateNonEmptyByteLength(
+  label: string,
+  value: string | null | undefined,
+  maxBytes: number
+): void {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`Oracle checkpoint ${label} must be a non-empty string.`);
+  }
+  validateByteLength(label, value, maxBytes);
+}
+
+function validateOptionalNonEmptyByteLength(
+  label: string,
+  value: string | null | undefined,
+  maxBytes: number
+): void {
+  if (value === null || value === undefined) return;
+  validateNonEmptyByteLength(label, value, maxBytes);
+}
+
 function validateCheckpointKeyFields({
   threadId,
   encodedCheckpointNs,
@@ -167,14 +187,18 @@ function validateCheckpointKeyFields({
   checkpointId?: string | null;
   parentCheckpointId?: string | null;
 }): void {
-  validateByteLength("thread_id", threadId, CHECKPOINT_KEY_MAX_BYTES);
+  validateNonEmptyByteLength("thread_id", threadId, CHECKPOINT_KEY_MAX_BYTES);
   validateByteLength(
     "checkpoint_ns",
     encodedCheckpointNs,
     CHECKPOINT_KEY_MAX_BYTES
   );
-  validateByteLength("checkpoint_id", checkpointId, CHECKPOINT_KEY_MAX_BYTES);
-  validateByteLength(
+  validateOptionalNonEmptyByteLength(
+    "checkpoint_id",
+    checkpointId,
+    CHECKPOINT_KEY_MAX_BYTES
+  );
+  validateOptionalNonEmptyByteLength(
     "parent_checkpoint_id",
     parentCheckpointId,
     CHECKPOINT_KEY_MAX_BYTES
@@ -188,7 +212,7 @@ function validateCheckpointListFields(
   beforeCheckpointId?: string
 ): void {
   if (threadId !== undefined) {
-    validateByteLength("thread_id", threadId, CHECKPOINT_KEY_MAX_BYTES);
+    validateNonEmptyByteLength("thread_id", threadId, CHECKPOINT_KEY_MAX_BYTES);
   }
   if (checkpointNs !== undefined && checkpointNs !== null) {
     validateByteLength(
@@ -197,8 +221,12 @@ function validateCheckpointListFields(
       CHECKPOINT_KEY_MAX_BYTES
     );
   }
-  validateByteLength("checkpoint_id", checkpointId, CHECKPOINT_KEY_MAX_BYTES);
-  validateByteLength(
+  validateOptionalNonEmptyByteLength(
+    "checkpoint_id",
+    checkpointId,
+    CHECKPOINT_KEY_MAX_BYTES
+  );
+  validateOptionalNonEmptyByteLength(
     "before.checkpoint_id",
     beforeCheckpointId,
     CHECKPOINT_KEY_MAX_BYTES
@@ -541,9 +569,9 @@ export class OracleCheckpointSaver extends BaseCheckpointSaver {
     validateCheckpointKeyFields({
       threadId,
       encodedCheckpointNs,
-      checkpointId,
+      checkpointId: checkpointId ?? undefined,
     });
-    validateByteLength("task_id", taskId, CHECKPOINT_KEY_MAX_BYTES);
+    validateNonEmptyByteLength("task_id", taskId, CHECKPOINT_KEY_MAX_BYTES);
     const query = writes.every(([channel]) => channel in WRITES_IDX_MAP)
       ? this.sql.UPSERT_CHECKPOINT_WRITES_SQL
       : this.sql.INSERT_CHECKPOINT_WRITES_SQL;
@@ -582,7 +610,7 @@ export class OracleCheckpointSaver extends BaseCheckpointSaver {
   }
 
   async deleteThread(threadId: string): Promise<void> {
-    validateByteLength("thread_id", threadId, CHECKPOINT_KEY_MAX_BYTES);
+    validateNonEmptyByteLength("thread_id", threadId, CHECKPOINT_KEY_MAX_BYTES);
     await this.setup();
     await this.withTransaction(async (connection) => {
       await connection.execute(this.sql.DELETE_CHECKPOINT_WRITES_SQL, {
@@ -944,8 +972,12 @@ WHERE table_name = UPPER(:table_name)
           threadId,
           encodedCheckpointNs,
         });
-        validateByteLength("channel", channel, CHECKPOINT_KEY_MAX_BYTES);
-        validateByteLength(
+        validateNonEmptyByteLength(
+          "channel",
+          channel,
+          CHECKPOINT_KEY_MAX_BYTES
+        );
+        validateNonEmptyByteLength(
           "channel version",
           String(version),
           CHECKPOINT_KEY_MAX_BYTES
@@ -993,8 +1025,12 @@ WHERE table_name = UPPER(:table_name)
           encodedCheckpointNs,
           checkpointId,
         });
-        validateByteLength("task_id", taskId, CHECKPOINT_KEY_MAX_BYTES);
-        validateByteLength("write channel", channel, CHECKPOINT_KEY_MAX_BYTES);
+        validateNonEmptyByteLength("task_id", taskId, CHECKPOINT_KEY_MAX_BYTES);
+        validateNonEmptyByteLength(
+          "write channel",
+          channel,
+          CHECKPOINT_KEY_MAX_BYTES
+        );
         const [type, blob] = await this.serde.dumpsTyped(value);
         validateByteLength(
           "write serializer type",

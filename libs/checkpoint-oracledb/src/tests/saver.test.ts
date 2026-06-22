@@ -149,4 +149,65 @@ describe("OracleCheckpointSaver", () => {
 
     expect(connection.maxConcurrentCheckpointWriteExecutions).toBe(1);
   });
+
+  test("rejects empty Oracle key fields before database writes", async () => {
+    const saver = new OracleCheckpointSaver({ connection: new FakeConnection() });
+    await saver.setup();
+
+    await expect(
+      saver.put(
+        { configurable: { thread_id: "thread-1" } },
+        { ...emptyCheckpoint(), id: "" },
+        { source: "update", step: -1, parents: {} },
+        {}
+      )
+    ).rejects.toThrow(
+      "Oracle checkpoint checkpoint_id must be a non-empty string."
+    );
+
+    await expect(
+      saver.put(
+        { configurable: { thread_id: "thread-1" } },
+        {
+          ...emptyCheckpoint(),
+          channel_values: { "": "value" },
+          channel_versions: { "": 1 },
+        },
+        { source: "update", step: -1, parents: {} },
+        { "": 1 }
+      )
+    ).rejects.toThrow("Oracle checkpoint channel must be a non-empty string.");
+
+    await expect(
+      saver.putWrites(
+        {
+          configurable: {
+            thread_id: "thread-1",
+            checkpoint_id: "checkpoint-1",
+          },
+        },
+        [["events", { ok: true }]],
+        ""
+      )
+    ).rejects.toThrow("Oracle checkpoint task_id must be a non-empty string.");
+
+    await expect(
+      saver.putWrites(
+        {
+          configurable: {
+            thread_id: "thread-1",
+            checkpoint_id: "checkpoint-1",
+          },
+        },
+        [["", { ok: true }]],
+        "task-1"
+      )
+    ).rejects.toThrow(
+      "Oracle checkpoint write channel must be a non-empty string."
+    );
+
+    await expect(saver.deleteThread("")).rejects.toThrow(
+      "Oracle checkpoint thread_id must be a non-empty string."
+    );
+  });
 });
