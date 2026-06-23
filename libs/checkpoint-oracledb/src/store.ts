@@ -177,6 +177,11 @@ type SqlFilter = {
   binds: Record<string, string | number>;
 };
 
+type TableExistsRow = {
+  TABLE_EXISTS: number;
+  table_exists?: number;
+};
+
 type NamespaceSqlFilter = {
   clause: string;
   binds: Record<string, string>;
@@ -1088,6 +1093,13 @@ export class OracleStore extends BaseStore {
             ? Number(current.rows[0].V ?? current.rows[0].v)
             : -1;
 
+          if (currentVersion >= 0) {
+            await this.assertSetupTableExists(connection, this.tableName);
+          }
+          if (currentVersion >= 1 && this.indexConfig) {
+            await this.assertSetupTableExists(connection, this.vectorTableName);
+          }
+
           if (currentVersion < 0) {
             try {
               await connection.execute(
@@ -1134,6 +1146,26 @@ export class OracleStore extends BaseStore {
     }
 
     this.isSetup = true;
+  }
+
+  private async assertSetupTableExists(
+    connection: Connection,
+    tableName: string
+  ): Promise<void> {
+    const result = await connection.execute<TableExistsRow>(
+      `SELECT COUNT(*) AS table_exists
+FROM user_tables
+WHERE table_name = :tableName`,
+      { tableName: tableName.toUpperCase() },
+      { outFormat: oracledb.OUT_FORMAT_OBJECT }
+    );
+    const row = result.rows?.[0];
+    const exists = Number(row?.TABLE_EXISTS ?? row?.table_exists ?? 0) > 0;
+    if (!exists) {
+      throw new Error(
+        `OracleStore setup found a migration record, but ${tableName} is missing.`
+      );
+    }
   }
 
   private async insertMigration(

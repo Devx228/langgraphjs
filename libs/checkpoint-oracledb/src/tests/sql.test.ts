@@ -14,6 +14,18 @@ describe("Oracle SQL helpers", () => {
     expect(() => validateTablePrefix("1bad")).toThrow(
       /must start with a letter/
     );
+    for (const invalidPrefix of [
+      "bad;drop",
+      "bad'quote",
+      "bad prefix",
+      "bad-prefix",
+      "bad--comment",
+      "bad/*comment*/",
+    ]) {
+      expect(() => validateTablePrefix(invalidPrefix)).toThrow(
+        /contain only letters, numbers, or underscores/
+      );
+    }
   });
 
   test("builds checkpoint table names", () => {

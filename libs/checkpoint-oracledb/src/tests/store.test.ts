@@ -9,6 +9,61 @@ const unusedPool = {
   },
 };
 
+class FakeSetupConnection {
+  committed = false;
+
+  rolledBack = false;
+
+  constructor(
+    private readonly options: {
+      currentVersion: number;
+      existingTables: Set<string>;
+    }
+  ) {}
+
+  async execute<RowT = Record<string, unknown>>(
+    sql: string,
+    binds: Record<string, unknown> = {}
+  ): Promise<{ rows?: RowT[] }> {
+    if (/^\s*CREATE TABLE\b/i.test(sql)) {
+      return {};
+    }
+    if (/SELECT v FROM/i.test(sql)) {
+      return { rows: [{ V: this.options.currentVersion } as RowT] };
+    }
+    if (/FROM user_tables/i.test(sql)) {
+      const tableName = String(binds.tableName ?? "").toUpperCase();
+      return {
+        rows: [
+          {
+            TABLE_EXISTS: this.options.existingTables.has(tableName) ? 1 : 0,
+          } as RowT,
+        ],
+      };
+    }
+    throw new Error(`Unexpected setup SQL: ${sql}`);
+  }
+
+  async commit(): Promise<void> {
+    this.committed = true;
+  }
+
+  async rollback(): Promise<void> {
+    this.rolledBack = true;
+  }
+
+  async close(): Promise<void> {}
+}
+
+function fakePool(connection: FakeSetupConnection) {
+  return {
+    async getConnection() {
+      return connection;
+    },
+    async close() {},
+  };
+}
+
 describe("OracleStore runtime validation", () => {
   test("rejects incomplete vector index configs at construction", () => {
     expect(
@@ -111,5 +166,52 @@ describe("OracleStore runtime validation", () => {
     await expect(store.put(["bad-values"], "circular", circular)).rejects.toThrow(
       "contains circular references"
     );
+  });
+
+  test("fails setup when store table is missing but migration is recorded", async () => {
+    const prefix = "MISSING_STORE_";
+    const connection = new FakeSetupConnection({
+      currentVersion: 0,
+      existingTables: new Set(),
+    });
+    const store = new OracleStore({
+      pool: fakePool(connection) as never,
+      tablePrefix: prefix,
+    });
+
+    await expect(store.search(["schema-missing"], { limit: 1 })).rejects.toThrow(
+      `${prefix}STORE is missing`
+    );
+    expect(connection.rolledBack).toBe(true);
+    expect(connection.committed).toBe(false);
+  });
+
+  test("fails setup when vector table is missing but vector migration is recorded", async () => {
+    const prefix = "MISSING_VECTOR_";
+    const connection = new FakeSetupConnection({
+      currentVersion: 1,
+      existingTables: new Set([`${prefix}STORE`]),
+    });
+    const store = new OracleStore({
+      pool: fakePool(connection) as never,
+      tablePrefix: prefix,
+      index: {
+        dims: 2,
+        embeddings: {
+          async embedDocuments() {
+            return [];
+          },
+          async embedQuery() {
+            return [0, 0];
+          },
+        } as never,
+      },
+    });
+
+    await expect(store.search(["schema-missing"], { query: "x" })).rejects.toThrow(
+      `${prefix}STORE_VECTORS is missing`
+    );
+    expect(connection.rolledBack).toBe(true);
+    expect(connection.committed).toBe(false);
   });
 });

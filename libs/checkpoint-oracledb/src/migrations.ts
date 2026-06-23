@@ -77,6 +77,11 @@ const getAddMetadataTypeSQL = (
 ): string => `ALTER TABLE ${tables.checkpoints}
 ADD metadata_type VARCHAR2(255)`;
 
+const getAllowNullableCheckpointWritesBlobSQL = (
+  tables: OracleCheckpointTables
+): string => `ALTER TABLE ${tables.checkpoint_writes}
+MODIFY blob NULL`;
+
 /**
  * To add a new migration, append a new SQL string. The array index is the
  * migration version persisted in checkpoint_migrations.v.
@@ -91,6 +96,7 @@ export const getMigrations = (
     getCreateCheckpointBlobsTableSQL(tables),
     getCreateCheckpointWritesTableSQL(tables),
     getAddMetadataTypeSQL(tables),
+    getAllowNullableCheckpointWritesBlobSQL(tables),
   ];
 };
 

@@ -88,6 +88,10 @@ type BindDefinition = {
   maxSize?: number;
 };
 
+type ExecuteOptionsWithBindDefs = Record<string, unknown> & {
+  bindDefs?: Record<string, BindDefinition>;
+};
+
 const STRING_512: BindDefinition = { type: oracledb.STRING, maxSize: 512 };
 const STRING_255: BindDefinition = { type: oracledb.STRING, maxSize: 255 };
 const NUMBER_BIND: BindDefinition = { type: oracledb.NUMBER };
@@ -132,6 +136,19 @@ const CHECKPOINT_WRITE_BINDS: Record<string, BindDefinition> = {
   channel: STRING_512,
   type: STRING_255,
   blob: BLOB_BIND,
+};
+
+const toExecuteBinds = (
+  binds: OracleBindParams,
+  bindDefs?: Record<string, BindDefinition>
+): Record<string, unknown> => {
+  if (!bindDefs) return binds;
+  return Object.fromEntries(
+    Object.entries(binds).map(([key, val]) => {
+      const def = bindDefs[key];
+      return [key, def ? { val, ...def } : val];
+    })
+  );
 };
 
 const getExpectedCheckpointTables = (
@@ -699,9 +716,10 @@ export class OracleCheckpointSaver extends BaseCheckpointSaver {
               bindDefs: CHECKPOINT_WRITE_BINDS,
             });
           } else {
-            await connection.execute(query, row, {
-              bindDefs: CHECKPOINT_WRITE_BINDS,
-            });
+            await connection.execute(
+              query,
+              toExecuteBinds(row, CHECKPOINT_WRITE_BINDS)
+            );
           }
         } catch (error) {
           if (
@@ -807,13 +825,15 @@ export class OracleCheckpointSaver extends BaseCheckpointSaver {
     connection: OracleConnectionLike,
     sql: string,
     binds: OracleBindParams,
-    options?: Record<string, unknown>
+    options?: ExecuteOptionsWithBindDefs
   ): Promise<OracleExecuteResult<OracleRow>> {
+    const { bindDefs, ...executeOptions } = options ?? {};
+    const executeBinds = toExecuteBinds(binds, bindDefs);
     try {
-      return await connection.execute(sql, binds, options);
+      return await connection.execute(sql, executeBinds, executeOptions);
     } catch (error) {
       if (!isOracleError(error, 1)) throw error;
-      return connection.execute(sql, binds, options);
+      return connection.execute(sql, executeBinds, executeOptions);
     }
   }
 

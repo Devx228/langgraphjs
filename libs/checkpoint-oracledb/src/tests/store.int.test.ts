@@ -4,10 +4,14 @@ import { describe, expect, test, type TestContext } from "vitest";
 
 import {
   InvalidNamespaceError,
+  type Item,
   type IndexConfig,
+  type Operation,
+  type SearchItem,
 } from "@langchain/langgraph-checkpoint";
 
 import { OracleStore } from "../store.js";
+import { encodeStoreKey, namespacePath } from "../store/namespace.js";
 
 config();
 
@@ -67,6 +71,34 @@ WHERE index_name = :indexName`,
     );
     const row = result.rows?.[0];
     return Number(row?.INDEX_COUNT ?? row?.index_count ?? 0) > 0;
+  } finally {
+    await connection.close();
+  }
+}
+
+async function countStoreRows(
+  prefix: string,
+  tableSuffix: "STORE" | "STORE_VECTORS",
+  namespace: string[],
+  key: string
+): Promise<number> {
+  const connection = await oracledb.getConnection(oracleConnection);
+  try {
+    const result = await connection.execute<{
+      ROW_COUNT: number;
+      row_count?: number;
+    }>(
+      `SELECT COUNT(*) AS row_count
+FROM ${prefix.toUpperCase()}${tableSuffix}
+WHERE namespace_path = :namespacePath AND item_key = :key`,
+      {
+        namespacePath: namespacePath(namespace),
+        key: encodeStoreKey(key),
+      },
+      { outFormat: oracledb.OUT_FORMAT_OBJECT }
+    );
+    const row = result.rows?.[0];
+    return Number(row?.ROW_COUNT ?? row?.row_count ?? 0);
   } finally {
     await connection.close();
   }
@@ -250,6 +282,86 @@ describeIfOracle("OracleStore BaseStore contract", () => {
     });
   });
 
+  test("handles large mixed batch operations without result reordering", async () => {
+    await withStore(async (store) => {
+      const namespace = ["batch-stress", "mixed"];
+      const putOps = Array.from({ length: 75 }, (_, index) => ({
+        namespace,
+        key: `item-${index.toString().padStart(3, "0")}`,
+        value: {
+          index,
+          group: index % 2 === 0 ? "even" : "odd",
+        },
+      }));
+      const getIndex = putOps.length;
+      const searchIndex = getIndex + 1;
+      const namespaceIndex = searchIndex + 1;
+      const deleteIndex = namespaceIndex + 1;
+      const deletedGetIndex = deleteIndex + 1;
+      const updateIndex = deletedGetIndex + 1;
+      const updatedGetIndex = updateIndex + 1;
+      const operations: Operation[] = [
+        ...putOps,
+        { namespace, key: "item-010" },
+        {
+          namespacePrefix: ["batch-stress"],
+          filter: { group: "even" },
+          limit: 100,
+          offset: 0,
+        },
+        {
+          matchConditions: [
+            { matchType: "prefix", path: ["batch-stress"] },
+          ],
+          maxDepth: 2,
+          limit: 10,
+          offset: 0,
+        },
+        { namespace, key: "item-020", value: null },
+        { namespace, key: "item-020" },
+        {
+          namespace,
+          key: "item-010",
+          value: { index: 10, group: "even", updated: true },
+        },
+        { namespace, key: "item-010" },
+      ];
+
+      const results = await store.batch(operations);
+      expect(results).toHaveLength(operations.length);
+      for (let i = 0; i < putOps.length; i += 1) {
+        expect(results[i]).toBeUndefined();
+      }
+
+      expect(results[getIndex] as Item).toMatchObject({
+        key: "item-010",
+        value: { index: 10, group: "even" },
+      });
+
+      const searchResults = results[searchIndex] as SearchItem[];
+      expect(searchResults).toHaveLength(38);
+      expect(searchResults[0]).toMatchObject({
+        key: "item-000",
+        value: { index: 0, group: "even" },
+      });
+      expect(searchResults[searchResults.length - 1]).toMatchObject({
+        key: "item-074",
+        value: { index: 74, group: "even" },
+      });
+
+      expect(results[namespaceIndex] as string[][]).toEqual([
+        ["batch-stress", "mixed"],
+      ]);
+      expect(results[deleteIndex]).toBeUndefined();
+      expect(results[deletedGetIndex]).toBeNull();
+      expect(results[updateIndex]).toBeUndefined();
+      expect(results[updatedGetIndex] as Item).toMatchObject({
+        key: "item-010",
+        value: { index: 10, group: "even", updated: true },
+      });
+    });
+  });
+
   test("searches namespace prefixes with limit and offset", async () => {
     await withStore(async (store) => {
       await store.put(["docs"], "root", { order: 0 });
@@ -327,6 +439,58 @@ describeIfOracle("OracleStore BaseStore contract", () => {
     });
   });
 
+  test("persists JSON store data across store instances with the same prefix", async () => {
+    const prefix = uniquePrefix();
+    let firstStore: OracleStore | undefined;
+    let secondStore: OracleStore | undefined;
+    const namespace = ["sessions", "json-persist"];
+
+    try {
+      firstStore = new OracleStore({
+        connection: oracleConnection,
+        tablePrefix: prefix,
+      });
+      await firstStore.put(namespace, "sync_key_1", {
+        question: "What is sync persistence?",
+        answer: "Data survives between sessions.",
+        timestamp: 12345,
+      });
+      await firstStore.stop();
+
+      secondStore = new OracleStore({
+        connection: oracleConnection,
+        tablePrefix: prefix,
+      });
+      await expect(
+        secondStore.get(namespace, "sync_key_1")
+      ).resolves.toMatchObject({
+        key: "sync_key_1",
+        namespace,
+        value: {
+          question: "What is sync persistence?",
+          answer: "Data survives between sessions.",
+          timestamp: 12345,
+        },
+      });
+
+      await secondStore.put(namespace, "sync_key_2", {
+        source: "second-session",
+      });
+      await expect(
+        secondStore.search(["sessions"], { limit: 10 })
+      ).resolves.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ key: "sync_key_1", namespace }),
+          expect.objectContaining({ key: "sync_key_2", namespace }),
+        ])
+      );
+    } finally {
+      await firstStore?.stop();
+      await secondStore?.stop();
+      await dropStoreTables(prefix);
+    }
+  });
+
   test("supports exact, operator, existence, and nested filters", async () => {
     await withStore(async (store) => {
       await store.put(["filters"], "one", {
@@ -396,6 +560,173 @@ describeIfOracle("OracleStore BaseStore contract", () => {
         })
       ).resolves.toEqual([
         expect.objectContaining({ key: "one" }),
+      ]);
+    });
+  });
+
+  test("handles boolean, numeric, and special-character filter combinations", async () => {
+    await withStore(async (store) => {
+      const namespace = ["filter-key-combos"];
+      await store.put(namespace, "boolean-true", {
+        enabled: true,
+        active: true,
+        archived: false,
+        visible: true,
+      });
+      await store.put(namespace, "boolean-false", {
+        enabled: false,
+        active: false,
+        archived: true,
+        visible: false,
+      });
+      await store.put(namespace, "zero", { count: 0 });
+      await store.put(namespace, "negative", { count: -42 });
+      await store.put(namespace, "single-quote", { text: "Hello 'World'" });
+      await store.put(namespace, "double-quote", { text: 'Test "quotes"' });
+      await store.put(namespace, "path", { path: "/usr/local/bin" });
+      await store.put(namespace, "sql-text", { query: "SELECT * FROM table" });
+
+      await expect(
+        store.search(namespace, { filter: { enabled: true } })
+      ).resolves.toEqual([expect.objectContaining({ key: "boolean-true" })]);
+      await expect(
+        store.search(namespace, { filter: { enabled: false } })
+      ).resolves.toEqual([expect.objectContaining({ key: "boolean-false" })]);
+      await expect(
+        store.search(namespace, {
+          filter: { active: true, archived: false, visible: true },
+        })
+      ).resolves.toEqual([expect.objectContaining({ key: "boolean-true" })]);
+      await expect(
+        store.search(namespace, { filter: { count: 0 } })
+      ).resolves.toEqual([expect.objectContaining({ key: "zero" })]);
+      await expect(
+        store.search(namespace, { filter: { count: { $lt: -1 } } })
+      ).resolves.toEqual([expect.objectContaining({ key: "negative" })]);
+      await expect(
+        store.search(namespace, { filter: { text: "Hello 'World'" } })
+      ).resolves.toEqual([expect.objectContaining({ key: "single-quote" })]);
+      await expect(
+        store.search(namespace, { filter: { text: 'Test "quotes"' } })
+      ).resolves.toEqual([expect.objectContaining({ key: "double-quote" })]);
+      await expect(
+        store.search(namespace, { filter: { path: "/usr/local/bin" } })
+      ).resolves.toEqual([expect.objectContaining({ key: "path" })]);
+      await expect(
+        store.search(namespace, { filter: { query: "SELECT * FROM table" } })
+      ).resolves.toEqual([expect.objectContaining({ key: "sql-text" })]);
+    });
+  });
+
+  test("searches mixed edge filters with pagination across nested prefixes", async () => {
+    await withStore(async (store) => {
+      const tenantA = ["search-matrix", "tenant-a", "docs"];
+      const tenantB = ["search-matrix", "tenant-b", "docs"];
+      await store.put(tenantA, "a-zero", {
+        status: "published",
+        score: 0,
+        price: 0.5,
+        enabled: true,
+        title: "quoted 'SQL'",
+        query: "SELECT * FROM memories WHERE owner = 'alice'",
+        tenant: "a",
+      });
+      await store.put(tenantA, "b-negative", {
+        status: "draft",
+        score: -3,
+        price: -1.25,
+        enabled: false,
+        title: 'double "quote"',
+        query: "DROP TABLE memories",
+        tenant: "a",
+      });
+      await store.put(tenantA, "c-float", {
+        status: "published",
+        score: 3.14,
+        price: 9.75,
+        enabled: true,
+        title: "plain",
+        query: "path /tmp/store",
+        tenant: "a",
+      });
+      await store.put(tenantB, "d-beta", {
+        status: "published",
+        score: 42,
+        price: 10.5,
+        enabled: true,
+        title: "beta",
+        query: "tenant b",
+        tenant: "b",
+      });
+
+      await expect(
+        store.search(["search-matrix"], {
+          filter: { title: { $eq: "quoted 'SQL'" } },
+          limit: 10,
+        })
+      ).resolves.toEqual([expect.objectContaining({ key: "a-zero" })]);
+      await expect(
+        store.search(["search-matrix"], {
+          filter: { status: { $ne: "published" } },
+          limit: 10,
+        })
+      ).resolves.toEqual([expect.objectContaining({ key: "b-negative" })]);
+      await expect(
+        store.search(["search-matrix"], {
+          filter: { score: { $gt: 0 } },
+          limit: 10,
+        })
+      ).resolves.toEqual([
+        expect.objectContaining({ key: "c-float" }),
+        expect.objectContaining({ key: "d-beta" }),
+      ]);
+      await expect(
+        store.search(["search-matrix"], {
+          filter: { score: { $gte: 0 } },
+          limit: 10,
+        })
+      ).resolves.toEqual([
+        expect.objectContaining({ key: "a-zero" }),
+        expect.objectContaining({ key: "c-float" }),
+        expect.objectContaining({ key: "d-beta" }),
+      ]);
+      await expect(
+        store.search(["search-matrix"], {
+          filter: { score: { $lt: 0 } },
+          limit: 10,
+        })
+      ).resolves.toEqual([expect.objectContaining({ key: "b-negative" })]);
+      await expect(
+        store.search(["search-matrix"], {
+          filter: { score: { $lte: 0 } },
+          limit: 10,
+        })
+      ).resolves.toEqual([
+        expect.objectContaining({ key: "a-zero" }),
+        expect.objectContaining({ key: "b-negative" }),
+      ]);
+      await expect(
+        store.search(["search-matrix"], {
+          filter: { enabled: false, query: "DROP TABLE memories" },
+          limit: 10,
+        })
+      ).resolves.toEqual([expect.objectContaining({ key: "b-negative" })]);
+
+      const paged = await store.search(["search-matrix"], {
+        filter: { status: "published", enabled: true },
+        offset: 1,
+        limit: 2,
+      });
+      expect(paged.map((item) => item.key)).toEqual(["c-float", "d-beta"]);
+
+      const tenantAResults = await store.search(["search-matrix", "tenant-a"], {
+        filter: { tenant: "a" },
+        limit: 10,
+      });
+      expect(tenantAResults.map((item) => item.key)).toEqual([
+        "a-zero",
+        "b-negative",
+        "c-float",
       ]);
     });
   });
@@ -1094,6 +1425,99 @@ describeIfOracle("OracleStore vector search", () => {
     } finally {
       await jsonStore.stop();
       await vectorStore.stop();
+      await dropStoreTables(prefix);
+    }
+  });
+
+  test("persists vector-indexed store data across store instances", async () => {
+    const prefix = uniquePrefix();
+    let firstStore: OracleStore | undefined;
+    let secondStore: OracleStore | undefined;
+    const namespace = ["sessions", "vector-persist"];
+
+    try {
+      firstStore = new OracleStore({
+        connection: oracleConnection,
+        tablePrefix: prefix,
+        index: indexConfig,
+      });
+      await firstStore.put(namespace, "sync_vector_key_1", {
+        text: "apple fruit persistence",
+        question: "What is vector persistence?",
+      });
+      await firstStore.stop();
+
+      secondStore = new OracleStore({
+        connection: oracleConnection,
+        tablePrefix: prefix,
+        index: indexConfig,
+      });
+      await expect(
+        secondStore.get(namespace, "sync_vector_key_1")
+      ).resolves.toMatchObject({
+        key: "sync_vector_key_1",
+        namespace,
+        value: {
+          text: "apple fruit persistence",
+          question: "What is vector persistence?",
+        },
+      });
+
+      const results = await secondStore.search(namespace, {
+        query: "fruit",
+        limit: 5,
+      });
+      expect(results.map((item) => item.key)).toContain("sync_vector_key_1");
+    } finally {
+      await firstStore?.stop();
+      await secondStore?.stop();
+      await dropStoreTables(prefix);
+    }
+  });
+
+  test("keeps one store/vector row for concurrent updates to the same key", async () => {
+    const prefix = uniquePrefix();
+    const store = new OracleStore({
+      connection: oracleConnection,
+      tablePrefix: prefix,
+      index: indexConfig,
+    });
+    const namespace = ["vectors", "concurrent-key"];
+    const key = "doc";
+
+    try {
+      await store.start();
+      await Promise.all(
+        Array.from({ length: 8 }, (_, index) =>
+          store.put(namespace, key, {
+            text: index % 2 === 0 ? "apple fruit" : "fast car",
+            version: index,
+          })
+        )
+      );
+
+      await expect(store.get(namespace, key)).resolves.toMatchObject({
+        key,
+        namespace,
+        value: {
+          text: expect.any(String),
+          version: expect.any(Number),
+        },
+      });
+      await expect(
+        countStoreRows(prefix, "STORE", namespace, key)
+      ).resolves.toBe(1);
+      await expect(
+        countStoreRows(prefix, "STORE_VECTORS", namespace, key)
+      ).resolves.toBe(1);
+
+      const results = await store.search(namespace, {
+        query: "apple",
+        limit: 10,
+      });
+      expect(results.filter((item) => item.key === key)).toHaveLength(1);
+    } finally {
+      await store.stop();
       await dropStoreTables(prefix);
     }
   });

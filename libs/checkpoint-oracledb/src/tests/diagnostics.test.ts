@@ -351,7 +351,7 @@ describe("Oracle diagnostics", () => {
     const connection = new FakeDiagnosticsConnection({
       prefix: "LG_READY_",
       checkpointTables: true,
-      checkpointApplied: [0, 1, 2, 3, 4],
+      checkpointApplied: [0, 1, 2, 3, 4, 5],
     });
     const saver = new OracleCheckpointSaver({
       connection,
@@ -361,7 +361,7 @@ describe("Oracle diagnostics", () => {
     const diagnostics = await saver.getDiagnostics();
 
     expect(diagnostics.status).toBe("ready");
-    expect(diagnostics.migrations.applied).toEqual([0, 1, 2, 3, 4]);
+    expect(diagnostics.migrations.applied).toEqual([0, 1, 2, 3, 4, 5]);
     expect(diagnostics.migrations.pending).toEqual([]);
     expect(diagnostics.schema.issues).toEqual([]);
     expect(diagnostics.storageMode).toBe("blob");
@@ -455,7 +455,7 @@ describe("Oracle diagnostics", () => {
     const connection = new FakeDiagnosticsConnection({
       prefix: "LG_SAFE_",
       checkpointTables: true,
-      checkpointApplied: [0, 1, 2, 3, 4],
+      checkpointApplied: [0, 1, 2, 3, 4, 5],
     });
     const saver = new OracleCheckpointSaver({
       connection,
