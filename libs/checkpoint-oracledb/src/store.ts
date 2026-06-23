@@ -504,6 +504,74 @@ function validateVectorDimensions(dims: number): void {
   }
 }
 
+function validateIndexConfig(index: IndexConfig): void {
+  validateVectorDimensions(index.dims);
+  if (
+    !index.embeddings ||
+    typeof index.embeddings.embedDocuments !== "function" ||
+    typeof index.embeddings.embedQuery !== "function"
+  ) {
+    throw new Error(
+      "OracleStore index embeddings must provide embedDocuments and embedQuery methods."
+    );
+  }
+  if (
+    index.fields !== undefined &&
+    (!Array.isArray(index.fields) ||
+      !index.fields.every((field) => typeof field === "string"))
+  ) {
+    throw new Error("OracleStore index fields must be an array of strings.");
+  }
+}
+
+function stringifyStoreValue(value: unknown): string {
+  const ancestors: object[] = [];
+  try {
+    const json = JSON.stringify(
+      value,
+      function (this: unknown, _key, nestedValue) {
+        if (typeof nestedValue === "number" && !Number.isFinite(nestedValue)) {
+          throw new Error("contains a non-finite number");
+        }
+        if (
+          nestedValue === undefined ||
+          typeof nestedValue === "function" ||
+          typeof nestedValue === "symbol" ||
+          typeof nestedValue === "bigint"
+        ) {
+          throw new Error(`contains unsupported ${typeof nestedValue} value`);
+        }
+        if (typeof nestedValue === "object" && nestedValue !== null) {
+          while (
+            ancestors.length > 0 &&
+            ancestors[ancestors.length - 1] !== this
+          ) {
+            ancestors.pop();
+          }
+          if (ancestors.includes(nestedValue)) {
+            throw new Error("contains circular references");
+          }
+          ancestors.push(nestedValue);
+        }
+        return nestedValue;
+      }
+    );
+    if (json === undefined) {
+      throw new Error("resolved to undefined");
+    }
+    return json;
+  } catch (error) {
+    const message =
+      typeof error === "object" &&
+      error !== null &&
+      "message" in error &&
+      typeof (error as { message?: unknown }).message === "string"
+        ? (error as { message: string }).message
+        : String(error);
+    throw new Error(`OracleStore values must be JSON-serializable: ${message}`);
+  }
+}
+
 function parseJson<T>(value: string | T): T {
   return typeof value === "string" ? (JSON.parse(value) as T) : value;
 }
@@ -819,7 +887,7 @@ export class OracleStore extends BaseStore {
       `${options.tablePrefix ?? DEFAULT_TABLE_PREFIX}STORE_MIGRATIONS`
     );
     this.ensureTable = options.ensureTable ?? true;
-    if (options.index) validateVectorDimensions(options.index.dims);
+    if (options.index) validateIndexConfig(options.index);
     this.indexConfig = options.index;
   }
 
@@ -1404,7 +1472,7 @@ WHERE namespace_path = :namespacePath AND item_key = :key AND field_path = :fiel
           namespacePath: path,
           namespaceJson: JSON.stringify(op.namespace),
           key,
-          valueJson: JSON.stringify(op.value),
+          valueJson: stringifyStoreValue(op.value),
         });
         vectorRows.push(
           ...(await this.getVectorRows(path, key, op.value, op.index))
