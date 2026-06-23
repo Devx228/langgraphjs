@@ -522,6 +522,14 @@ describe("RunProtocolSession", () => {
                 id: "ai_1",
                 type: "ai",
                 content: "",
+                response_metadata: {
+                  model_provider: "openai",
+                  usage: {
+                    input_tokens: 5,
+                    output_tokens: 2,
+                    total_tokens: 7,
+                  },
+                },
                 tool_calls: [
                   {
                     id: "call_123",
@@ -614,5 +622,39 @@ describe("RunProtocolSession", () => {
         },
       },
     ]);
+  });
+
+  it("normalizes custom:<name> extension channel events for scoped subscriptions", async () => {
+    const sent: unknown[] = [];
+    const session = createSession(sent);
+    await session.start();
+    sent.length = 0;
+
+    await session.handleCommand(
+      JSON.stringify({
+        id: 1,
+        method: "subscription.subscribe",
+        params: { channels: ["custom:timeline"] },
+      })
+    );
+    sent.length = 0;
+
+    await session.ingestSourceEvent({
+      id: "1",
+      event: "custom:timeline",
+      normalized: true,
+      data: { kind: "run-started", id: "tl-1" },
+    });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      method: "custom",
+      params: {
+        data: {
+          name: "timeline",
+          payload: { kind: "run-started", id: "tl-1" },
+        },
+      },
+    });
   });
 });

@@ -27,13 +27,16 @@ coverage/
 # Local environment files
 .env
 .env.*
-**/.env
-
+*.pem
+*.key
+*.crt
+credentials.json
 .ipynb_checkpoints
 dist-cjs
 **/dist-cjs
 tmp/
 __pycache__
+.venv
 .DS_Store
 tsconfig.vitest-temp.json
 .pnpm-store
@@ -42,15 +45,4 @@ tsconfig.vitest-temp.json
 .vitest-attachments
 agent-os/
 __screenshots__
-
-# Local audit/review scratch files
-BOSS_BUG_HUNTER.md
-BUG_HUNTER.md
-*BUG*HUNTER*.md
-*bug*hunter*.md
-**/BOSS_BUG_HUNTER.md
-**/BUG_HUNTER.md
-**/*BUG*HUNTER*.md
-**/*bug*hunter*.md
-# !libs/checkpoint-oracledb/REVIEW_SETUP.md
-oracle-notes/
+*_*.md

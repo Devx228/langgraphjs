@@ -1,5 +1,40 @@
 # @langchain/langgraph-checkpoint-mongodb
 
+## 1.4.0
+
+### Minor Changes
+
+- [#1928](https://github.com/langchain-ai/langgraphjs/pull/1928) [`3d7fcea`](https://github.com/langchain-ai/langgraphjs/commit/3d7fcea7d7ea7f1203d24be9df607d5a8e8717bc) Thanks [@Mihailoff](https://github.com/Mihailoff)! - Add TTL support for automatic checkpoint expiration
+
+  - Add optional `ttl` parameter to MongoDBSaver (value in seconds)
+  - Add `setup()` method to create TTL indexes on collections
+  - Add `upserted_at` timestamp to documents when TTL is enabled
+  - Each write refreshes TTL (expires after inactivity, not creation)
+
+### Patch Changes
+
+- [#2556](https://github.com/langchain-ai/langgraphjs/pull/2556) [`bee3c91`](https://github.com/langchain-ai/langgraphjs/commit/bee3c91d0adc315ebde0622d8c4b1fff041c1bfd) Thanks [@mohamedkhaled4053](https://github.com/mohamedkhaled4053)! - Fix `MongoDBSaver.putWrites` throwing `MongoServerError: Invalid BulkOperation, Batch cannot be empty` when called with an empty `writes` array. This is reached by human-in-the-loop / `interrupt()` flows, where a task can complete producing zero channel writes and LangGraph calls `putWrites(config, [], taskId)`. `putWrites` now no-ops on empty writes, matching the behavior of the postgres and sqlite savers (which iterate and naturally skip empty batches).
+
+- [#2550](https://github.com/langchain-ai/langgraphjs/pull/2550) [`2b8cc2f`](https://github.com/langchain-ai/langgraphjs/commit/2b8cc2f3fd5c9d3c33b56e013292daf5d936428e) Thanks [@lazydiv](https://github.com/lazydiv)! - feat(checkpoint-mongodb): add setup() to create required indexes
+
+## 1.3.4
+
+### Patch Changes
+
+- [#2517](https://github.com/langchain-ai/langgraphjs/pull/2517) [`67a4f8d`](https://github.com/langchain-ai/langgraphjs/commit/67a4f8da580eb527fa6f201a4c72895754fe37f7) Thanks [@jackjin1997](https://github.com/jackjin1997)! - fix: `MongoDBSaver.putWrites` now honors `WRITES_IDX_MAP`, pinning special channels (`__error__`, `__scheduled__`, `__interrupt__`, `__resume__`) to fixed negative indices instead of the call-local ordinal. Previously a mixed `putWrites([[...regular...], [INTERRUPT, …]], taskId)` placed the INTERRUPT at a positive idx that could collide with a regular write at the same `(task_id, idx)`, and the unconditional `$set` upsert silently overwrote whichever row landed there first. The conflict-resolution clause now matches the Postgres / SQLite (TS and Python) checkpointers: `$set` only when every channel is a special one, `$setOnInsert` otherwise.
+
+## 1.3.3
+
+### Patch Changes
+
+- [#2260](https://github.com/langchain-ai/langgraphjs/pull/2260) [`4d03dcb`](https://github.com/langchain-ai/langgraphjs/commit/4d03dcbc28bbfdf4c0f0ac065b9853652836d2f9) Thanks [@venkat22022202](https://github.com/venkat22022202)! - fix(mongodb): include pendingWrites in list() results
+
+## 1.3.2
+
+### Patch Changes
+
+- [#2186](https://github.com/langchain-ai/langgraphjs/pull/2186) [`26c2e32`](https://github.com/langchain-ai/langgraphjs/commit/26c2e325f435a2c061d6b78a7bd6af089cb1e0e6) Thanks [@jackjin1997](https://github.com/jackjin1997)! - fix: metadata filter in list() now works by querying a plain JSON shadow copy instead of the serialized binary blob
+
 ## 1.3.1
 
 ### Patch Changes
