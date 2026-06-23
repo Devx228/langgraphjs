@@ -24,7 +24,11 @@ coverage/
 **/.turbo
 **/.eslintcache
 
+# Local environment files
 .env
+.env.*
+**/.env
+
 .ipynb_checkpoints
 dist-cjs
 **/dist-cjs
@@ -38,6 +42,15 @@ tsconfig.vitest-temp.json
 .vitest-attachments
 agent-os/
 __screenshots__
-*_*.md
-!libs/checkpoint-oracledb/REVIEW_SETUP.md
+
+# Local audit/review scratch files
+BOSS_BUG_HUNTER.md
+BUG_HUNTER.md
+*BUG*HUNTER*.md
+*bug*hunter*.md
+**/BOSS_BUG_HUNTER.md
+**/BUG_HUNTER.md
+**/*BUG*HUNTER*.md
+**/*bug*hunter*.md
+# !libs/checkpoint-oracledb/REVIEW_SETUP.md
 oracle-notes/

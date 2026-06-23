@@ -1,4 +1,7 @@
-const ORACLE_IDENTIFIER_MAX_LENGTH = 128;
+import { Buffer } from "node:buffer";
+
+export const DEFAULT_TABLE_PREFIX = "LANGGRAPH_";
+export const ORACLE_IDENTIFIER_MAX_LENGTH = 128;
 
 export type OracleRowLike = Record<string, unknown>;
 
@@ -23,6 +26,22 @@ export const optionalRowValue = <T>(
   row: OracleRowLike,
   key: string
 ): T | undefined => rowValue<T | undefined>(row, key);
+
+export const validateUtf8ByteLength = (
+  context: string,
+  label: string,
+  value: string | null | undefined,
+  maxBytes: number,
+  suffix = ""
+): void => {
+  if (value === null || value === undefined) return;
+  const byteLength = Buffer.byteLength(value, "utf8");
+  if (byteLength > maxBytes) {
+    throw new Error(
+      `${context} ${label} exceeds ${maxBytes} bytes${suffix}. Received ${byteLength} bytes.`
+    );
+  }
+};
 
 export const oracleConstraintName = (
   tableName: string,

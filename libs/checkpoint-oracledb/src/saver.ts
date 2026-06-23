@@ -37,7 +37,11 @@ import {
   getPendingSendsParams,
   validateTablePrefix,
 } from "./sql.js";
-import { isOracleError, rowValue } from "./utils.js";
+import {
+  isOracleError,
+  rowValue,
+  validateUtf8ByteLength,
+} from "./utils.js";
 
 export interface OracleConnectionOptions {
   [key: string]: unknown;
@@ -90,6 +94,8 @@ const NUMBER_BIND: BindDefinition = { type: oracledb.NUMBER };
 const BLOB_BIND: BindDefinition = { type: oracledb.BLOB };
 const CHECKPOINT_KEY_MAX_BYTES = 512;
 const CHECKPOINT_TYPE_MAX_BYTES = 255;
+const CHECKPOINT_BYTE_CONTEXT = "Oracle checkpoint";
+const CHECKPOINT_BYTE_SUFFIX = " after encoding";
 
 const CHECKPOINT_BINDS: Record<string, BindDefinition> = {
   thread_id: STRING_512,
@@ -208,20 +214,6 @@ function isConnection(value: unknown): value is OracleConnectionLike {
   );
 }
 
-function validateByteLength(
-  label: string,
-  value: string | null | undefined,
-  maxBytes: number
-): void {
-  if (value === null || value === undefined) return;
-  const byteLength = Buffer.byteLength(value, "utf8");
-  if (byteLength > maxBytes) {
-    throw new Error(
-      `Oracle checkpoint ${label} exceeds ${maxBytes} bytes after encoding. Received ${byteLength} bytes.`
-    );
-  }
-}
-
 function validateNonEmptyByteLength(
   label: string,
   value: string | null | undefined,
@@ -230,7 +222,13 @@ function validateNonEmptyByteLength(
   if (typeof value !== "string" || value.length === 0) {
     throw new Error(`Oracle checkpoint ${label} must be a non-empty string.`);
   }
-  validateByteLength(label, value, maxBytes);
+  validateUtf8ByteLength(
+    CHECKPOINT_BYTE_CONTEXT,
+    label,
+    value,
+    maxBytes,
+    CHECKPOINT_BYTE_SUFFIX
+  );
 }
 
 function validateOptionalNonEmptyByteLength(
@@ -254,10 +252,12 @@ function validateCheckpointKeyFields({
   parentCheckpointId?: string | null;
 }): void {
   validateNonEmptyByteLength("thread_id", threadId, CHECKPOINT_KEY_MAX_BYTES);
-  validateByteLength(
+  validateUtf8ByteLength(
+    CHECKPOINT_BYTE_CONTEXT,
     "checkpoint_ns",
     encodedCheckpointNs,
-    CHECKPOINT_KEY_MAX_BYTES
+    CHECKPOINT_KEY_MAX_BYTES,
+    CHECKPOINT_BYTE_SUFFIX
   );
   validateOptionalNonEmptyByteLength(
     "checkpoint_id",
@@ -281,10 +281,12 @@ function validateCheckpointListFields(
     validateNonEmptyByteLength("thread_id", threadId, CHECKPOINT_KEY_MAX_BYTES);
   }
   if (checkpointNs !== undefined && checkpointNs !== null) {
-    validateByteLength(
+    validateUtf8ByteLength(
+      CHECKPOINT_BYTE_CONTEXT,
       "checkpoint_ns",
       encodeCheckpointNamespace(checkpointNs),
-      CHECKPOINT_KEY_MAX_BYTES
+      CHECKPOINT_KEY_MAX_BYTES,
+      CHECKPOINT_BYTE_SUFFIX
     );
   }
   validateOptionalNonEmptyByteLength(
@@ -590,15 +592,19 @@ export class OracleCheckpointSaver extends BaseCheckpointSaver {
     const [checkpointType, checkpointBytes] =
       await this.dumpCheckpoint(checkpoint);
     const [metadataType, metadataBytes] = await this.dumpValue(metadata);
-    validateByteLength(
+    validateUtf8ByteLength(
+      CHECKPOINT_BYTE_CONTEXT,
       "checkpoint serializer type",
       checkpointType,
-      CHECKPOINT_TYPE_MAX_BYTES
+      CHECKPOINT_TYPE_MAX_BYTES,
+      CHECKPOINT_BYTE_SUFFIX
     );
-    validateByteLength(
+    validateUtf8ByteLength(
+      CHECKPOINT_BYTE_CONTEXT,
       "metadata serializer type",
       metadataType,
-      CHECKPOINT_TYPE_MAX_BYTES
+      CHECKPOINT_TYPE_MAX_BYTES,
+      CHECKPOINT_BYTE_SUFFIX
     );
     const blobRows = await this.dumpBlobs(
       threadId,
@@ -1089,10 +1095,12 @@ WHERE table_name = UPPER(:table_name)
           };
         }
         const [type, blob] = await this.serde.dumpsTyped(values[channel]);
-        validateByteLength(
+        validateUtf8ByteLength(
+          CHECKPOINT_BYTE_CONTEXT,
           "channel serializer type",
           type,
-          CHECKPOINT_TYPE_MAX_BYTES
+          CHECKPOINT_TYPE_MAX_BYTES,
+          CHECKPOINT_BYTE_SUFFIX
         );
         return {
           thread_id: threadId,
@@ -1128,10 +1136,12 @@ WHERE table_name = UPPER(:table_name)
           CHECKPOINT_KEY_MAX_BYTES
         );
         const [type, blob] = await this.serde.dumpsTyped(value);
-        validateByteLength(
+        validateUtf8ByteLength(
+          CHECKPOINT_BYTE_CONTEXT,
           "write serializer type",
           type,
-          CHECKPOINT_TYPE_MAX_BYTES
+          CHECKPOINT_TYPE_MAX_BYTES,
+          CHECKPOINT_BYTE_SUFFIX
         );
         return {
           thread_id: threadId,

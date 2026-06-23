@@ -32,11 +32,31 @@ From inside this monorepo workspace:
 pnpm install
 ```
 
-When published, install the package with the final package name used for release:
+Install the package from npm:
 
 ```sh
-pnpm add @oracle/langgraph-oracledb oracledb
+pnpm add @oracle/langgraph-oracledb @langchain/core @langchain/langgraph-checkpoint
 ```
+
+## Diagnostics
+
+Both integrations expose read-only diagnostics for schema, migration, runtime,
+and Oracle capability checks. These are useful as a first review step because
+they do not run setup or mutate data.
+
+```ts
+const checkpointDiagnostics = await checkpointer.getDiagnostics({
+  includeRowCounts: true,
+});
+
+const storeDiagnostics = await store.getDiagnostics({
+  includeRowCounts: true,
+});
+```
+
+Diagnostics report expected table names, migration status, missing or
+mismatched columns, primary-key status, runtime node-oracledb mode, and VECTOR
+availability for stores.
 
 ## Checkpoint Saver
 
@@ -197,10 +217,33 @@ Vector indexing supports:
 - array paths such as `chapters[*].content`, `authors[0].name`, and `items[-1].text`
 - per-put field overrides via `store.put(namespace, key, value, ["field.path"])`
 - `index: false` to store the JSON row without vector rows
+- dimension validation for `index.dims` before any Oracle DDL or DML runs; dimensions must be between 1 and 65535
 
 Rows without vector entries can still appear as scoreless results after scored vector matches, matching LangGraph's in-memory store behavior.
 
-Vector values are currently passed to Oracle with `TO_VECTOR(:embedding)` string binds. The store validates that all embedding values are finite numbers, that embedding dimensions match `index.dims`, and that vector literals do not exceed Oracle's 32767-byte string bind limit before executing SQL.
+The store validates that all embedding values are finite numbers and that embedding dimensions match `index.dims`. It uses native node-oracledb VECTOR binds when available and falls back to `TO_VECTOR(:embedding)` string binds for compatibility. The string-bind fallback validates Oracle's 32767-byte bind limit before executing SQL.
+
+### Vector Index Management
+
+`OracleStore` can create, list, and drop Oracle VECTOR indexes for the configured vector table.
+
+```ts
+await store.createVectorIndex({
+  type: "IVF",
+  name: "LG_MEMORY_IVF_IDX",
+  accuracy: 90,
+  neighborPartitions: 1,
+});
+
+const indexes = await store.listVectorIndexes();
+
+await store.dropVectorIndex({
+  name: "LG_MEMORY_IVF_IDX",
+  ifExists: true,
+});
+```
+
+Supported index types are `HNSW` and `IVF`. HNSW-specific options are `neighbors` and `efConstruction`, which must be provided together. IVF-specific options use `neighborPartitions`. Index names are validated as Oracle identifiers, and `dropVectorIndex()` refuses to drop an index unless it is on the store's vector embedding column.
 
 ## Table Names and Setup
 
@@ -223,14 +266,17 @@ Setup is idempotent and records migrations in the migration table. Transient set
 
 ## Examples
 
-This package includes two local examples:
+This package includes local examples and deterministic demos:
 
 ```sh
 pnpm --filter @oracle/langgraph-oracledb example:agent
 pnpm --filter @oracle/langgraph-oracledb example:graph
+pnpm --filter @oracle/langgraph-oracledb demo:mentor:reset
+pnpm --filter @oracle/langgraph-oracledb demo:mentor
+pnpm --filter @oracle/langgraph-oracledb demo:mentor:vector
 ```
 
-Both examples require `ORACLE_USER`, `ORACLE_PASSWORD`, and `ORACLE_CONNECT_STRING`.
+All examples require `ORACLE_USER`, `ORACLE_PASSWORD`, and `ORACLE_CONNECT_STRING`.
 
 ## End-to-End Mentor Demo
 
@@ -294,8 +340,8 @@ If Oracle credentials are not present, Oracle integration tests are skipped.
 ## Current Limitations
 
 - Oracle VECTOR rows are not automatically backfilled for existing JSON-only store rows when vector indexing is enabled later. Updating an item with indexing enabled creates vector rows for that item.
-- ANN/vector index creation is not managed yet.
-- VECTOR writes and queries use `TO_VECTOR(:embedding)` string binds with a documented 32767-byte preflight limit.
+- VECTOR indexes are not created automatically during setup. Create them explicitly with `createVectorIndex()` when you want Oracle ANN indexing.
+- Native VECTOR binds are used when node-oracledb and the connected database support them; otherwise VECTOR writes and queries fall back to `TO_VECTOR(:embedding)` string binds with a documented 32767-byte preflight limit.
 - Complex filters and wildcard/depth namespace listing can require broader SQL scans followed by strict JavaScript filtering.
 - Store key encoding is not backward-compatible with pre-encoding OracleStore rows. This is acceptable before first release; shipped data would require a migration or a dual-read strategy.
 

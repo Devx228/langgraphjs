@@ -4,6 +4,7 @@ import {
   oracleErrorCode,
   optionalRowValue as rowValue,
 } from "./utils.js";
+import { ORACLE_VECTOR_MAX_DIMENSIONS } from "./store/constants.js";
 
 export type OracleDiagnosticsStatus =
   | "ready"
@@ -577,7 +578,11 @@ export const probeOracleVector = async (
   connection: OracleDiagnosticsConnection,
   dims: number
 ): Promise<OracleStoreVectorDiagnostics["probe"]> => {
-  const vector = `[${new Array(Math.max(1, dims)).fill(0).join(",")}]`;
+  const safeDims =
+    typeof dims === "number" && Number.isFinite(dims) && dims > 0
+      ? Math.min(Math.floor(dims), ORACLE_VECTOR_MAX_DIMENSIONS)
+      : 1;
+  const vector = `[${new Array(safeDims).fill(0).join(",")}]`;
   try {
     await executeSelect(
       connection,

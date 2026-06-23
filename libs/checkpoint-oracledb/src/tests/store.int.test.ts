@@ -818,7 +818,7 @@ describeIfOracle("OracleStore vector search", () => {
               embeddings: testEmbeddings as IndexConfig["embeddings"],
             },
           })
-      ).toThrow("OracleStore index dims must be a positive integer");
+      ).toThrow("OracleStore index dims must be an integer between 1 and");
     }
   });
 

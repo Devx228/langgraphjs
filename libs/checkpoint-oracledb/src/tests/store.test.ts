@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 
 import { OracleStore } from "../store.js";
+import { ORACLE_VECTOR_MAX_DIMENSIONS } from "../store/constants.js";
 
 const unusedPool = {
   async getConnection() {
@@ -48,6 +49,39 @@ describe("OracleStore runtime validation", () => {
           } as never,
         })
     ).toThrow("OracleStore index fields must be an array of strings.");
+  });
+
+  test("rejects invalid and oversized vector dimensions at construction", () => {
+    const embeddings = {
+      async embedDocuments() {
+        return [];
+      },
+      async embedQuery() {
+        return [];
+      },
+    };
+
+    for (const dims of [
+      0,
+      -1,
+      1.5,
+      Number.POSITIVE_INFINITY,
+      Number.NaN,
+      ORACLE_VECTOR_MAX_DIMENSIONS + 1,
+      Number.MAX_SAFE_INTEGER,
+    ]) {
+      expect(
+        () =>
+          new OracleStore({
+            index: {
+              dims,
+              embeddings: embeddings as never,
+            },
+          })
+      ).toThrow(
+        `OracleStore index dims must be an integer between 1 and ${ORACLE_VECTOR_MAX_DIMENSIONS}`
+      );
+    }
   });
 
   test("rejects non-JSON-serializable store values before Oracle writes", async () => {

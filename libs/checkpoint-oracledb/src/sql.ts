@@ -1,9 +1,14 @@
 import { Buffer } from "node:buffer";
 
-export const DEFAULT_TABLE_PREFIX = "LANGGRAPH_";
+import {
+  DEFAULT_TABLE_PREFIX,
+  ORACLE_IDENTIFIER_MAX_LENGTH,
+} from "./utils.js";
+
+export { DEFAULT_TABLE_PREFIX };
+
 export const TASKS_CHANNEL = "__pregel_tasks";
 
-const ORACLE_IDENTIFIER_MAX_LENGTH = 128;
 const TABLE_SUFFIXES = [
   "CHECKPOINTS",
   "CHECKPOINT_BLOBS",

@@ -29,13 +29,14 @@ import {
   getCreateStoreVectorTableSQL,
 } from "./store-migrations.js";
 import {
-  DEFAULT_TABLE_PREFIX,
   JSON_VALUE_VARCHAR_MAX_BYTES,
+  ORACLE_VECTOR_MAX_DIMENSIONS,
   STORE_FIELD_PATH_MAX_BYTES,
   STORE_KEY_MAX_BYTES,
   STORE_NAMESPACE_PATH_MAX_BYTES,
   VECTOR_STRING_BIND_MAX_BYTES,
 } from "./store/constants.js";
+import { validateTablePrefix } from "./sql.js";
 import {
   generatedIdentifier,
   validateIdentifier,
@@ -55,7 +56,7 @@ import {
   namespacePrefixLikePattern,
   validateNamespace,
 } from "./store/namespace.js";
-import { isOracleError } from "./utils.js";
+import { isOracleError, validateUtf8ByteLength } from "./utils.js";
 
 export interface OracleConnectionOptions {
   [key: string]: unknown;
@@ -224,6 +225,8 @@ const getExpectedStoreTables = (
     primaryKey: ["namespace_path", "item_key", "field_path"],
   },
 ];
+
+const STORE_BYTE_CONTEXT = "OracleStore";
 
 function defaultVectorIndexName(
   vectorTableName: string,
@@ -402,22 +405,9 @@ function validateDropVectorIndexOptions(
   return validateIdentifier(options.name);
 }
 
-function validateByteLength(
-  label: string,
-  value: string | null | undefined,
-  maxBytes: number
-): void {
-  if (value === null || value === undefined) return;
-  const byteLength = Buffer.byteLength(value, "utf8");
-  if (byteLength > maxBytes) {
-    throw new Error(
-      `OracleStore ${label} exceeds ${maxBytes} bytes. Received ${byteLength} bytes.`
-    );
-  }
-}
-
 function validateNamespacePathLength(namespace: string[]): void {
-  validateByteLength(
+  validateUtf8ByteLength(
+    STORE_BYTE_CONTEXT,
     "namespace path",
     namespacePath(namespace),
     STORE_NAMESPACE_PATH_MAX_BYTES
@@ -425,7 +415,12 @@ function validateNamespacePathLength(namespace: string[]): void {
 }
 
 function validateStoreKey(key: string): void {
-  validateByteLength("key", encodeStoreKey(key), STORE_KEY_MAX_BYTES);
+  validateUtf8ByteLength(
+    STORE_BYTE_CONTEXT,
+    "key",
+    encodeStoreKey(key),
+    STORE_KEY_MAX_BYTES
+  );
 }
 
 function validateVectorValues(vector: number[]): void {
@@ -497,9 +492,14 @@ function probeVector(dims: number): number[] {
 }
 
 function validateVectorDimensions(dims: number): void {
-  if (!Number.isFinite(dims) || !Number.isInteger(dims) || dims <= 0) {
+  if (
+    typeof dims !== "number" ||
+    !Number.isSafeInteger(dims) ||
+    dims <= 0 ||
+    dims > ORACLE_VECTOR_MAX_DIMENSIONS
+  ) {
     throw new Error(
-      `OracleStore index dims must be a positive integer. Received ${String(dims)}.`
+      `OracleStore index dims must be an integer between 1 and ${ORACLE_VECTOR_MAX_DIMENSIONS}. Received ${String(dims)}.`
     );
   }
 }
@@ -877,14 +877,11 @@ export class OracleStore extends BaseStore {
     this.pool = options.pool;
     this.connectionOptions = options.connection;
     this.ownsPool = options.pool === undefined;
-    this.tableName = validateIdentifier(
-      `${options.tablePrefix ?? DEFAULT_TABLE_PREFIX}STORE`
-    );
-    this.vectorTableName = validateIdentifier(
-      `${options.tablePrefix ?? DEFAULT_TABLE_PREFIX}STORE_VECTORS`
-    );
+    const tablePrefix = validateTablePrefix(options.tablePrefix);
+    this.tableName = validateIdentifier(`${tablePrefix}STORE`);
+    this.vectorTableName = validateIdentifier(`${tablePrefix}STORE_VECTORS`);
     this.migrationTableName = validateIdentifier(
-      `${options.tablePrefix ?? DEFAULT_TABLE_PREFIX}STORE_MIGRATIONS`
+      `${tablePrefix}STORE_MIGRATIONS`
     );
     this.ensureTable = options.ensureTable ?? true;
     if (options.index) validateIndexConfig(options.index);
@@ -1654,13 +1651,19 @@ WHERE namespace_path = :namespacePath AND item_key = :key`,
     const textRows: Array<{ fieldPath: string; text: string }> = [];
 
     for (const field of fields) {
-      validateByteLength("vector field path", field, STORE_FIELD_PATH_MAX_BYTES);
+      validateUtf8ByteLength(
+        STORE_BYTE_CONTEXT,
+        "vector field path",
+        field,
+        STORE_FIELD_PATH_MAX_BYTES
+      );
       const texts = getTextAtPath(value, field);
       texts.forEach((text, i) => {
         const trimmed = text.trim();
         if (!trimmed) return;
         const fieldPath = texts.length > 1 ? `${field}.${i}` : field;
-        validateByteLength(
+        validateUtf8ByteLength(
+          STORE_BYTE_CONTEXT,
           "vector field path",
           fieldPath,
           STORE_FIELD_PATH_MAX_BYTES
