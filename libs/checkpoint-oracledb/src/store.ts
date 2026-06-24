@@ -935,9 +935,12 @@ export class OracleStore extends BaseStore {
   }
 
   async stop(): Promise<void> {
-    if (this.pool && this.ownsPool) {
-      await this.pool.close(0);
-      this.pool = undefined;
+    try {
+      if (this.pool && this.ownsPool) {
+        await this.pool.close(0);
+        this.pool = undefined;
+      }
+    } finally {
       this.isSetup = false;
       this.setupPromise = undefined;
       this.vectorBindStrategy = undefined;
@@ -986,10 +989,23 @@ export class OracleStore extends BaseStore {
               (column) => column.columnName.toUpperCase() === "EMBEDDING"
             )
           : undefined;
+      const schemaStatus = getOracleDiagnosticsStatus(schema, migrations);
+      const status =
+        vectorRequired &&
+        schemaStatus === "ready" &&
+        vectorProbe.status !== "available"
+          ? vectorProbe.status === "unavailable"
+            ? "partial"
+            : "unknown"
+          : schemaStatus;
+      const issues = [...schema.issues];
+      if (vectorRequired && vectorProbe.status !== "available") {
+        issues.push(`Oracle VECTOR probe status is ${vectorProbe.status}.`);
+      }
 
       return {
         kind: "store",
-        status: getOracleDiagnosticsStatus(schema, migrations),
+        status,
         tablePrefix: this.tableName.slice(0, -"STORE".length),
         tables,
         runtime: getOracleRuntimeDiagnostics(oracledb, connection),
@@ -1014,7 +1030,7 @@ export class OracleStore extends BaseStore {
           },
           observedIndexes: vectorTable?.indexes ?? [],
         },
-        issues: [...schema.issues],
+        issues,
       };
     });
   }

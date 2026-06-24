@@ -58,6 +58,11 @@ Diagnostics report expected table names, migration status, missing or
 mismatched columns, primary-key status, runtime node-oracledb mode, and VECTOR
 availability for stores.
 
+For stores configured with vector indexing, the top-level diagnostics status
+also reflects VECTOR probe readiness: an unavailable VECTOR probe reports a
+partial store status, while an inconclusive probe reports unknown. Inspect
+`storeDiagnostics.vector.probe` for the database error details.
+
 ## Checkpoint Saver
 
 `OracleCheckpointSaver` persists graph checkpoints and pending writes in Oracle tables. Call `setup()` before first use so the migration table and checkpoint tables exist.

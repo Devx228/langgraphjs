@@ -64,6 +64,16 @@ function fakePool(connection: FakeSetupConnection) {
   };
 }
 
+interface StoreStateProbe {
+  setup(): Promise<void>;
+  isSetup: boolean;
+  setupPromise?: Promise<void>;
+  vectorBindStrategy?: "native" | "string";
+  nativeVectorDmlProbed: boolean;
+  pool?: unknown;
+  ownsPool: boolean;
+}
+
 describe("OracleStore runtime validation", () => {
   test("rejects incomplete vector index configs at construction", () => {
     expect(
@@ -213,5 +223,75 @@ describe("OracleStore runtime validation", () => {
     );
     expect(connection.rolledBack).toBe(true);
     expect(connection.committed).toBe(false);
+  });
+
+  test("stop resets setup and vector probe state for caller supplied pools", async () => {
+    const prefix = "EXTERNAL_POOL_";
+    const connection = new FakeSetupConnection({
+      currentVersion: 0,
+      existingTables: new Set([`${prefix}STORE`]),
+    });
+    let closeCalls = 0;
+    const pool = {
+      async getConnection() {
+        return connection;
+      },
+      async close() {
+        closeCalls += 1;
+      },
+    };
+    const store = new OracleStore({
+      pool: pool as never,
+      tablePrefix: prefix,
+    });
+    const probe = store as unknown as StoreStateProbe;
+
+    await probe.setup();
+    expect(probe.isSetup).toBe(true);
+    expect(probe.setupPromise).toBeDefined();
+
+    probe.vectorBindStrategy = "string";
+    probe.nativeVectorDmlProbed = true;
+
+    await store.stop();
+
+    expect(closeCalls).toBe(0);
+    expect(probe.pool).toBe(pool);
+    expect(probe.isSetup).toBe(false);
+    expect(probe.setupPromise).toBeUndefined();
+    expect(probe.vectorBindStrategy).toBeUndefined();
+    expect(probe.nativeVectorDmlProbed).toBe(false);
+  });
+
+  test("stop resets setup and vector probe state when owned pool close fails", async () => {
+    let closeCalls = 0;
+    const pool = {
+      async getConnection() {
+        throw new Error("should not request a connection");
+      },
+      async close() {
+        closeCalls += 1;
+        throw new Error("close failed");
+      },
+    };
+    const store = new OracleStore({
+      pool: pool as never,
+      tablePrefix: "OWNED_CLOSE_FAIL_",
+    });
+    const probe = store as unknown as StoreStateProbe;
+    probe.ownsPool = true;
+    probe.isSetup = true;
+    probe.setupPromise = Promise.resolve();
+    probe.vectorBindStrategy = "native";
+    probe.nativeVectorDmlProbed = true;
+
+    await expect(store.stop()).rejects.toThrow("close failed");
+
+    expect(closeCalls).toBe(1);
+    expect(probe.pool).toBe(pool);
+    expect(probe.isSetup).toBe(false);
+    expect(probe.setupPromise).toBeUndefined();
+    expect(probe.vectorBindStrategy).toBeUndefined();
+    expect(probe.nativeVectorDmlProbed).toBe(false);
   });
 });

@@ -420,7 +420,7 @@ describe("Oracle diagnostics", () => {
     expect(enabledDiagnostics.vector.configured).toBe(true);
   });
 
-  test("reports vector probe unavailability without failing diagnostics", async () => {
+  test("degrades store diagnostics when configured vector probe is unavailable", async () => {
     const connection = new FakeDiagnosticsConnection({
       prefix: "LG_NOVECTOR_",
       storeTables: true,
@@ -444,11 +444,48 @@ describe("Oracle diagnostics", () => {
 
     const diagnostics = await store.getDiagnostics();
 
-    expect(diagnostics.status).toBe("ready");
+    expect(diagnostics.status).toBe("partial");
     expect(diagnostics.vector.probe).toMatchObject({
       status: "unavailable",
       error: { reason: "vector_probe_failed", code: 904 },
     });
+    expect(diagnostics.issues).toContain(
+      "Oracle VECTOR probe status is unavailable."
+    );
+  });
+
+  test("reports unknown store diagnostics when configured vector probe is inconclusive", async () => {
+    const connection = new FakeDiagnosticsConnection({
+      prefix: "LG_UNKNOWNVECTOR_",
+      storeTables: true,
+      vectorTable: true,
+      storeApplied: [0, 1],
+      vectorProbeErrorCode: 6502,
+    });
+    const store = new OracleStore({
+      pool: {
+        async getConnection() {
+          return connection;
+        },
+        async close() {},
+      },
+      tablePrefix: "lg_unknownvector_",
+      index: {
+        dims: 2,
+        embeddings: diagnosticsEmbeddings,
+      },
+    });
+
+    const diagnostics = await store.getDiagnostics();
+
+    expect(diagnostics.status).toBe("unknown");
+    expect(diagnostics.vector.probe).toMatchObject({
+      status: "unknown",
+      error: { reason: "vector_probe_failed", code: 6502 },
+    });
+    expect(diagnostics.issues).toContain(
+      "Oracle VECTOR probe status is unknown."
+    );
   });
 
   test("does not expose credential-like fields", async () => {
