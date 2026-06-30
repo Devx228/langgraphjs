@@ -101,6 +101,17 @@ const CHECKPOINT_TYPE_MAX_BYTES = 255;
 const CHECKPOINT_BYTE_CONTEXT = "Oracle checkpoint";
 const CHECKPOINT_BYTE_SUFFIX = " after encoding";
 
+const isNullableBlobMigration = (sql: string): boolean =>
+  /\bMODIFY\s+blob\s+NULL\b/i.test(sql);
+
+const isIdempotentMigrationError = (
+  error: unknown,
+  migrationSql: string
+): boolean =>
+  isOracleError(error, 955) ||
+  isOracleError(error, 1430) ||
+  (isOracleError(error, 1451) && isNullableBlobMigration(migrationSql));
+
 const CHECKPOINT_BINDS: Record<string, BindDefinition> = {
   thread_id: STRING_512,
   checkpoint_ns: STRING_512,
@@ -318,6 +329,18 @@ function validateCheckpointListFields(
   );
 }
 
+function validateCheckpointListLimit(
+  limit: number | undefined
+): number | undefined {
+  if (limit === undefined) return undefined;
+  if (!Number.isFinite(limit) || !Number.isInteger(limit) || limit < 0) {
+    throw new Error(
+      "Oracle checkpoint list limit must be a non-negative integer."
+    );
+  }
+  return limit;
+}
+
 async function closeConnection(connection: OracleConnectionLike): Promise<void> {
   if (connection.close) {
     await connection.close();
@@ -434,12 +457,11 @@ export class OracleCheckpointSaver extends BaseCheckpointSaver {
         version < migrations.length;
         version += 1
       ) {
+        const migrationSql = migrations[version];
         try {
-          await connection.execute(migrations[version]);
+          await connection.execute(migrationSql);
         } catch (error) {
-          if (!isOracleError(error, 955) && !isOracleError(error, 1430)) {
-            throw error;
-          }
+          if (!isIdempotentMigrationError(error, migrationSql)) throw error;
         }
 
         try {
@@ -548,6 +570,7 @@ export class OracleCheckpointSaver extends BaseCheckpointSaver {
       config.configurable?.checkpoint_id,
       options?.before?.configurable?.checkpoint_id
     );
+    const limit = validateCheckpointListLimit(options?.limit);
     await this.setup();
     const query = buildSelectCheckpointSQL(
       {
@@ -559,16 +582,13 @@ export class OracleCheckpointSaver extends BaseCheckpointSaver {
             : config.configurable.checkpoint_ns,
         checkpointId: config.configurable?.checkpoint_id,
         beforeCheckpointId: options?.before?.configurable?.checkpoint_id,
-        limit: options?.filter ? undefined : options?.limit,
+        limit: options?.filter ? undefined : limit,
       },
       this.tablePrefix
     );
 
     const rows = await this.selectCheckpointRows(query.sql, query.binds);
     let yielded = 0;
-    const limit = options?.limit !== undefined
-      ? Number.parseInt(options.limit.toString(), 10)
-      : undefined;
     if (limit !== undefined && limit <= 0) return;
 
     for (const row of rows) {

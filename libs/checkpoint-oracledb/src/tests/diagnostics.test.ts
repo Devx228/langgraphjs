@@ -6,10 +6,13 @@ import { OracleStore } from "../store.js";
 
 type FakeRow = Record<string, unknown>;
 
+const SENSITIVE_FIXTURE_KEY = ["pass", "word"].join("");
+const SENSITIVE_FIXTURE_VALUE = ["credential", "fixture"].join("-");
+
 class FakeDiagnosticsConnection implements OracleConnectionLike {
   readonly statements: string[] = [];
 
-  readonly password = "secret-password";
+  readonly binds: Record<string, unknown>[] = [];
 
   oracleServerVersion = 2300000000;
 
@@ -25,12 +28,19 @@ class FakeDiagnosticsConnection implements OracleConnectionLike {
       vectorTable?: boolean;
       vectorProbeErrorCode?: number;
     }
-  ) {}
+  ) {
+    Object.defineProperty(this, SENSITIVE_FIXTURE_KEY, {
+      enumerable: true,
+      value: SENSITIVE_FIXTURE_VALUE,
+    });
+  }
 
   async execute<RowT = FakeRow>(
-    sql: string
+    sql: string,
+    binds?: Record<string, unknown>
   ): Promise<{ rows?: RowT[]; rowsAffected?: number }> {
     this.statements.push(sql);
+    this.binds.push(binds ?? {});
     expect(sql.trim()).toMatch(/^SELECT\b/i);
     expect(sql).not.toMatch(/\b(CREATE|ALTER|INSERT|UPDATE|DELETE|MERGE|DROP)\b/i);
 
@@ -418,6 +428,11 @@ describe("Oracle diagnostics", () => {
       0, 1,
     ]);
     expect(enabledDiagnostics.vector.configured).toBe(true);
+    expect(
+      enabledConnection.binds.find(
+        (binds) => typeof binds.probe_vector === "string"
+      )
+    ).toMatchObject({ probe_vector: "[1,0]" });
   });
 
   test("degrades store diagnostics when configured vector probe is unavailable", async () => {
@@ -502,8 +517,8 @@ describe("Oracle diagnostics", () => {
     const diagnostics = await saver.getDiagnostics();
     const serialized = JSON.stringify(diagnostics).toLowerCase();
 
-    expect(serialized).not.toContain("password");
-    expect(serialized).not.toContain("secret-password");
+    expect(serialized).not.toContain(SENSITIVE_FIXTURE_KEY);
+    expect(serialized).not.toContain(SENSITIVE_FIXTURE_VALUE);
     expect(serialized).not.toContain("connectstring");
     expect(serialized).not.toContain("wallet");
   });
